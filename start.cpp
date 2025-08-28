@@ -1,4 +1,4 @@
-#include<bits/stdc++.h>
+#include <bits/stdc++.h>
 using namespace std;
 
 struct Village {
@@ -227,6 +227,238 @@ double obj_func(State& state) {
     return state.objective;
 }
 
+// Strategy 1: GREEDY NEAREST-NEIGHBOR WITH DEMAND PRIORITIZATION (RECOMMENDED)
+State generate_greedy_initial_state() {
+    State state;
+    state.helis.resize(H);
+    
+    // Calculate demand priority for each village (people * distance from nearest city)
+    vector<pair<double, int>> village_priority;
+    for (int v = 0; v < V; v++) {
+        double min_dist = INFINITY;
+        for (int c = 0; c < C; c++) {
+            double dist = calculate_distance(cities[c], {villages[v].x, villages[v].y});
+            min_dist = min(min_dist, dist);
+        }
+        // Priority = demand / accessibility (higher = more urgent)
+        double priority = (villages[v].n * 9.0) / (min_dist + 1.0);
+        village_priority.push_back({priority, v});
+    }
+    sort(village_priority.rbegin(), village_priority.rend()); // Descending priority
+    
+    vector<bool> village_served(V, false);
+    
+    for (int h = 0; h < H; h++) {
+        pair<double, double> home_pos = cities[helis[h].home_city - 1];
+        
+        while (true) {
+            // Find nearest unserved village from current position
+            int best_village = -1;
+            double best_distance = INFINITY;
+            
+            for (auto& [priority, v] : village_priority) {
+                if (village_served[v]) continue;
+                
+                pair<double, double> village_pos = {villages[v].x, villages[v].y};
+                double dist = calculate_distance(home_pos, village_pos);
+                
+                if (dist < best_distance) {
+                    best_distance = dist;
+                    best_village = v;
+                }
+            }
+            
+            if (best_village == -1) break; // No more villages
+            
+            // Create a trip to this village
+            Trip trip;
+            
+            // Calculate optimal package allocation
+            int people = villages[best_village].n;
+            int food_needed = people * 9;
+            int other_needed = people * 1;
+            
+            // Maximize value: prefer perishable food
+            int perishable_packets = min(food_needed, (int)(helis[h].w_cap / w_p));
+            int remaining_food = food_needed - perishable_packets;
+            
+            double remaining_capacity = helis[h].w_cap - perishable_packets * w_p;
+            int dry_packets = min(remaining_food, (int)(remaining_capacity / w_d));
+            
+            remaining_capacity -= dry_packets * w_d;
+            int other_packets = min(other_needed, (int)(remaining_capacity / w_o));
+            
+            // Check if trip is feasible
+            double trip_dist = 2 * calculate_distance(home_pos, {villages[best_village].x, villages[best_village].y});
+            if (trip_dist <= helis[h].dcap && 
+                (perishable_packets * w_p + dry_packets * w_d + other_packets * w_o) <= helis[h].w_cap) {
+                
+                Delivery delivery = {best_village + 1, dry_packets, perishable_packets, other_packets}; // 1-indexed
+                trip.stops.push_back(delivery);
+                state.helis[h].trips.push_back(trip);
+            }
+            
+            village_served[best_village] = true;
+        }
+    }
+    
+    return state;
+}
+
+// Strategy 2: CAPACITY-BASED CLUSTERING
+State generate_cluster_initial_state() {
+    State state;
+    state.helis.resize(H);
+    
+    // Assign villages to helicopters based on distance to home cities
+    vector<vector<int>> heli_villages(H);
+    
+    for (int v = 0; v < V; v++) {
+        double best_distance = INFINITY;
+        int best_heli = 0;
+        
+        for (int h = 0; h < H; h++) {
+            pair<double, double> home_pos = cities[helis[h].home_city - 1];
+            pair<double, double> village_pos = {villages[v].x, villages[v].y};
+            double dist = calculate_distance(home_pos, village_pos);
+            
+            if (dist < best_distance) {
+                best_distance = dist;
+                best_heli = h;
+            }
+        }
+        heli_villages[best_heli].push_back(v);
+    }
+    
+    // Create trips for each helicopter
+    for (int h = 0; h < H; h++) {
+        if (heli_villages[h].empty()) continue;
+        
+        // Sort villages by distance from home
+        pair<double, double> home_pos = cities[helis[h].home_city - 1];
+        sort(heli_villages[h].begin(), heli_villages[h].end(), 
+             [&](int v1, int v2) {
+                 double d1 = calculate_distance(home_pos, {villages[v1].x, villages[v1].y});
+                 double d2 = calculate_distance(home_pos, {villages[v2].x, villages[v2].y});
+                 return d1 < d2;
+             });
+        
+        // Create single-village trips (simple approach)
+        for (int v : heli_villages[h]) {
+            Trip trip;
+            
+            // Simple allocation: try to meet basic needs
+            int people = villages[v].n;
+            int food_packets = min(people * 9, (int)(helis[h].w_cap / w_p));
+            int other_packets = min(people * 1, (int)((helis[h].w_cap - food_packets * w_p) / w_o));
+            
+            Delivery delivery = {v + 1, 0, food_packets, other_packets}; // 1-indexed, prefer perishable
+            trip.stops.push_back(delivery);
+            state.helis[h].trips.push_back(trip);
+        }
+    }
+    
+    return state;
+}
+
+// Strategy 3: SIMPLE ROUND-ROBIN (Fallback)
+State generate_simple_initial_state() {
+    State state;
+    state.helis.resize(H);
+    
+    // Assign villages to helicopters in round-robin fashion
+    for (int v = 0; v < V; v++) {
+        int h = v % H; // Simple round-robin assignment
+        
+        Trip trip;
+        
+        // Basic package allocation
+        int people = villages[v].n;
+        double max_weight = helis[h].w_cap;
+        
+        // Try to allocate optimally within weight limits
+        int perishable = min(people * 9, (int)(max_weight / (2 * w_p))); // Leave room for other
+        int other = min(people * 1, (int)((max_weight - perishable * w_p) / w_o));
+        
+        Delivery delivery = {v + 1, 0, perishable, other}; // 1-indexed
+        trip.stops.push_back(delivery);
+        state.helis[h].trips.push_back(trip);
+    }
+    
+    return state;
+}
+
+// Strategy 4: DEMAND-WEIGHTED INITIALIZATION
+State generate_demand_weighted_initial_state() {
+    State state;
+    state.helis.resize(H);
+    
+    // Calculate total demand
+    double total_demand = 0;
+    for (int v = 0; v < V; v++) {
+        total_demand += villages[v].n * 9; // Food demand
+    }
+    
+    // Calculate helicopter capacity ratios
+    double total_capacity = 0;
+    for (int h = 0; h < H; h++) {
+        total_capacity += helis[h].w_cap;
+    }
+    
+    // Assign villages proportionally
+    vector<bool> assigned(V, false);
+    for (int h = 0; h < H; h++) {
+        double heli_ratio = helis[h].w_cap / total_capacity;
+        double target_demand = total_demand * heli_ratio;
+        double current_demand = 0;
+        
+        pair<double, double> home_pos = cities[helis[h].home_city - 1];
+        
+        // Find nearest villages until capacity is roughly matched
+        while (current_demand < target_demand) {
+            int best_village = -1;
+            double best_distance = INFINITY;
+            
+            for (int v = 0; v < V; v++) {
+                if (assigned[v]) continue;
+                
+                pair<double, double> village_pos = {villages[v].x, villages[v].y};
+                double dist = calculate_distance(home_pos, village_pos);
+                
+                if (dist < best_distance) {
+                    best_distance = dist;
+                    best_village = v;
+                }
+            }
+            
+            if (best_village == -1) break;
+            
+            // Create trip for this village
+            Trip trip;
+            int people = villages[best_village].n;
+            int food_needed = people * 9;
+            current_demand += food_needed;
+            
+            // Allocate packages
+            int perishable = min(food_needed, (int)(helis[h].w_cap / w_p));
+            int other = min(people, (int)((helis[h].w_cap - perishable * w_p) / w_o));
+            
+            Delivery delivery = {best_village + 1, 0, perishable, other}; // 1-indexed
+            trip.stops.push_back(delivery);
+            state.helis[h].trips.push_back(trip);
+            
+            assigned[best_village] = true;
+        }
+    }
+    
+    return state;
+}
+
+// RECOMMENDED: Use Strategy 1 (Greedy Nearest-Neighbor with Demand Prioritization)
+State generate_initial_state() {
+    return generate_greedy_initial_state();
+}
+
 int main(){
     double time;
     cin >> time;
@@ -271,8 +503,9 @@ int main(){
         test_state.helis[h].total_distance = 0.0;
     }
     
+    State initial_state = generate_initial_state();
     // Calculate objective (this will fill all the missing fields)
-    double result = obj_func(test_state);
+    double result = obj_func(initial_state);
     cout << "Objective value: " << result << endl;
 
     return 0;
