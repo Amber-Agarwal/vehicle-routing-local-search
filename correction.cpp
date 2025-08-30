@@ -190,16 +190,94 @@ int adaptive_picking(const std::vector<double>& weights, std::mt19937& rng){
     }
     return (int)weights.size() - 1;
 }
+// This helper calculates the TRUE value a new delivery will add,
+// respecting the per-village food limit.
+double calculate_effective_value_change(const State& s, const Delivery& del) {
+    int v_idx = del.village - 1;
+    
+    // Get the village's food limit
+    int food_limit = 9 * villages[v_idx].n;
+
+    // Find out how much food has already been delivered
+    int current_food = s.delivered[v_idx][0] + s.delivered[v_idx][1];
+
+    // Calculate how much more food the village can take before hitting the limit
+    int food_room_left = std::max(0, food_limit - current_food);
+
+    // This delivery adds a certain amount of new food
+    int food_in_delivery = del.d + del.p;
+
+    // The "useful" new food is the smaller of what's in the delivery vs. what's needed
+    int useful_added_food = std::min(food_in_delivery, food_room_left);
+
+    double effective_value = 0.0;
+
+    // Calculate the value of the useful added food, prioritizing perishable ('p')
+    if (useful_added_food > 0) {
+        int useful_p = std::min(del.p, useful_added_food);
+        effective_value += useful_p * v_p;
+        
+        int remaining_useful_food = useful_added_food - useful_p;
+        effective_value += remaining_useful_food * v_d;
+    }
+
+    // Add the value of 'other' packets (assuming they have no limit)
+    effective_value += del.o * v_o;
+
+    return effective_value;
+}
+// Helper function to calculate the total effective value from a village's deliveries
+// This is needed by the function below.
+double calculate_value_for_village(const std::array<int, 3>& delivered_packets, int v_idx) {
+    int food_limit = 9 * villages[v_idx].n;
+    int total_food = delivered_packets[0] + delivered_packets[1];
+    int useful_food = std::min(total_food, food_limit);
+    
+    double value = 0.0;
+    int perishable = delivered_packets[1];
+    if (useful_food <= perishable) {
+        value += useful_food * v_p;
+    } else {
+        value += perishable * v_p;
+        value += (useful_food - perishable) * v_d;
+    }
+    value += delivered_packets[2] * v_o;
+    return value;
+}
+
+// This calculates the TRUE change in value when a delivery is REMOVED.
+double calculate_effective_value_change_on_removal(const State& s, const Delivery& del) {
+    int v_idx = del.village - 1;
+    
+    // 1. Calculate the village's total value BEFORE the removal
+    double value_before = calculate_value_for_village(s.delivered[v_idx], v_idx);
+
+    // 2. Simulate the removal
+    std::array<int, 3> delivered_after = s.delivered[v_idx];
+    delivered_after[0] -= del.d;
+    delivered_after[1] -= del.p;
+    delivered_after[2] -= del.o;
+
+    // 3. Calculate the village's total value AFTER the removal
+    double value_after = calculate_value_for_village(delivered_after, v_idx);
+
+    // 4. The change is the difference
+    return value_after - value_before; // This will be negative or zero
+}
 
 // ===================================================================
 // DESTROY OPERATORS
 // ===================================================================
-
 void remove_stop_from_trip(State& s, Pool& pool, const Stop_tracking& ref) {
     Trip &trip = s.helis[ref.h].trips[ref.t];
     Delivery del = trip.stops[ref.s];
 
     pool.removed.push_back({del.village, del.d, del.p, del.o});
+    
+    // --- FIX: Calculate the true change in value BEFORE updating state ---
+    double effective_value_change = calculate_effective_value_change_on_removal(s, del);
+    
+    // Update delivered counts AFTER calculating the change
     s.delivered[del.village - 1][0] -= del.d;
     s.delivered[del.village - 1][1] -= del.p;
     s.delivered[del.village - 1][2] -= del.o;
@@ -209,22 +287,24 @@ void remove_stop_from_trip(State& s, Pool& pool, const Stop_tracking& ref) {
     int next_node = (ref.s == (int)trip.stops.size() - 1) ? helis[ref.h].home_city - 1 : C + trip.stops[ref.s + 1].village - 1;
 
     double dist_change = dist_matrix[prev_node][next_node] - (dist_matrix[prev_node][current_node] + dist_matrix[current_node][next_node]);
-    double del_value = del.d * v_d + del.p * v_p + del.o * v_o;
     double cost_change = helis[ref.h].alpha * dist_change;
     
-    s.objective -= (del_value - cost_change);
+    // Use the corrected effective_value_change for the objective update.
+    // The change is (value_change - cost_change).
+    s.objective += (effective_value_change - cost_change);
 
+    // Update other cached values
+    double raw_del_value = del.d * v_d + del.p * v_p + del.o * v_o;
     trip.distance += dist_change;
     s.helis[ref.h].total_distance += dist_change;
-    trip.value -= del_value;
+    trip.value -= raw_del_value; // Trip cache uses raw value
     trip.weight -= (del.d * w_d + del.p * w_p + del.o * w_o);
 
     trip.stops.erase(trip.stops.begin() + ref.s);
     if (trip.stops.empty()) {
-        s.objective += helis[ref.h].F; // Add back the cost, since cost is subtracted from objective
+        s.objective += helis[ref.h].F;
     }
 }
-
 void perform_sorted_removals(State& s, Pool& pool, std::vector<Stop_tracking>& to_remove_refs) {
     sort(to_remove_refs.begin(), to_remove_refs.end(), [](const auto& a, const auto& b){
         if (a.h != b.h) return a.h > b.h;
@@ -250,6 +330,7 @@ Pool destroy_random_stop(State & s, int num_remove, std::mt19937 & rng) {
     for(int i=0; i<num_to_remove; ++i) to_remove_refs.push_back(candidates[i]);
     
     perform_sorted_removals(s, pool, to_remove_refs);
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
     return pool;
 }
 
@@ -261,25 +342,42 @@ Pool destroy_route_remove(State & s, int num_remove, std::mt19937 & rng) {
 
     shuffle(candidates.begin(), candidates.end(), rng);
     int remove_count = std::min(num_remove, (int)candidates.size());
-
+// --- FIX PART 1: Collect trips to remove instead of modifying immediately ---
+    std::vector<std::pair<int, int>> trips_to_remove;
     for (int k = 0; k < remove_count; k++) {
-        auto [h, t] = candidates[k];
-        Trip &trip = s.helis[h].trips[t];
-        
-        if (trip.value > 1e-9 || trip.distance > 1e-9) {
-            s.objective -= (trip.value - (helis[h].alpha * trip.distance + helis[h].F));
-        }
+        trips_to_remove.push_back(candidates[k]);
+    }
+
+    // Sort the indices in descending order to allow for safe removal
+    sort(trips_to_remove.begin(), trips_to_remove.end(), [](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first > b.first; // Helicopter index
+        return a.second > b.second; // Trip index
+    });
+
+    // --- FIX PART 2: Now, iterate through the sorted list and safely remove ---
+    for (const auto& ref : trips_to_remove) {
+        int h = ref.first;
+        int t = ref.second;
+        Trip& trip = s.helis[h].trips[t];
+
+        // Perform all state updates as before
+        // double effective_trip_value = calculate_effective_trip_value(s, trip);
+        // s.objective -= (effective_trip_value - (helis[h].alpha * trip.distance + helis[h].F));
         
         for (const Delivery &del : trip.stops) {
             pool.removed.push_back({del.village, del.d, del.p, del.o});
-            s.delivered[del.village - 1][0] -= del.d;
-            s.delivered[del.village - 1][1] -= del.p;
-            s.delivered[del.village - 1][2] -= del.o;
+            // s.delivered[del.village - 1][0] -= del.d;
+            // s.delivered[del.village - 1][1] -= del.p;
+            // s.delivered[del.village - 1][2] -= del.o;
         }
         
-        s.helis[h].total_distance -= trip.distance;
-        trip = Trip();
+        // s.helis[h].total_distance -= trip.distance;
+
+        // Erase the trip from the vector
+        s.helis[h].trips.erase(s.helis[h].trips.begin() + t);
     }
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
+
     return pool;
 }
 
@@ -307,6 +405,7 @@ Pool destroy_shaw(State &s, int num_remove, std::mt19937 &rng) {
     for(int i=0; i<num_to_remove; ++i) to_remove_refs.push_back(scored[i].second);
     
     perform_sorted_removals(s, pool, to_remove_refs);
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
     return pool;
 }
 
@@ -340,6 +439,7 @@ Pool destroy_worst_value(State & s, int num_remove, std::mt19937 & rng) {
     for(int i=0; i<num_to_remove; ++i) to_remove_refs.push_back(scored[i].second);
     
     perform_sorted_removals(s, pool, to_remove_refs);
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
     return pool;
 }
 
@@ -376,6 +476,7 @@ Pool destroy_perishable_aware(State & s, int num_remove, std::mt19937 & rng) {
     for(int i=0; i<num_to_remove; ++i) to_remove_refs.push_back(scored[i].second);
     
     perform_sorted_removals(s, pool, to_remove_refs);
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
     return pool;
 }
 
@@ -517,18 +618,20 @@ bool swap_packet_type(State& s, std::mt19937& rng) {
 // ===================================================================
 // REPAIR OPERATORS
 // ===================================================================
-
 void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng) {
     shuffle(pool.removed.begin(), pool.removed.end(), rng);
     auto it = pool.removed.begin();
     while (it != pool.removed.end()) {
         Delivery del{it->v, it->d, it->p, it->o};
-        double del_value = del.d * v_d + del.p * v_p + del.o * v_o;
+        // We still need del_weight for constraint checking
         double del_weight = del.d * w_d + del.p * w_p + del.o * w_o;
 
         double best_gain = -1e18;
         int best_h = -1, best_t = -1, best_pos = -1;
         double best_extra_dist = 0.0;
+
+        // --- FIX PART 1: Calculate true effective value for gain calculation ---
+        double effective_value = calculate_effective_value_change(s, del);
 
         for (int h = 0; h < (int)s.helis.size(); h++) {
             for (int t = 0; t < (int)s.helis[h].trips.size(); t++) {
@@ -543,7 +646,8 @@ void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng) {
                     if (s.helis[h].total_distance + extra_dist > DMax + 1e-9) continue;
                     if (trip.weight + del_weight > helis[h].w_cap + 1e-9) continue;
 
-                    double gain = del_value - helis[h].alpha*extra_dist;
+                    // Use the corrected 'effective_value' here
+                    double gain = effective_value - helis[h].alpha * extra_dist;
                     if (gain > best_gain) {
                         best_gain = gain; best_h = h; best_t = t; best_pos = pos; best_extra_dist = extra_dist;
                     }
@@ -555,17 +659,26 @@ void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng) {
         if (best_gain > -1e17) {
             Trip &trip = s.helis[best_h].trips[best_t];
             trip.stops.insert(trip.stops.begin() + best_pos, del);
-            trip.distance += best_extra_dist; trip.value += del_value; trip.weight += del_weight;
+
+            // Note: trip.value should be updated with the RAW value of packets,
+            // as it's just a cache for that trip. The global objective uses the true gain.
+            double raw_del_value = del.d * v_d + del.p * v_p + del.o * v_o;
+            trip.distance += best_extra_dist;
+            trip.value += raw_del_value; 
+            trip.weight += del_weight;
+
             s.helis[best_h].total_distance += best_extra_dist;
             s.delivered[del.village - 1][0] += del.d; s.delivered[del.village - 1][1] += del.p; s.delivered[del.village - 1][2] += del.o;
-            s.objective += best_gain;
+            s.objective += best_gain; // This now uses the CORRECT gain
             inserted = true;
         } else {
             double best_new_trip_gain = -1e18; int best_h_for_new_trip = -1;
             for (int h = 0; h < (int)s.helis.size(); h++) {
                 double trip_dist = dist_matrix[helis[h].home_city-1][C+del.village-1] * 2;
                 if (trip_dist <= helis[h].dcap + 1e-9 && del_weight <= helis[h].w_cap + 1e-9 && s.helis[h].total_distance + trip_dist <= DMax + 1e-9) {
-                    double new_trip_gain = del_value - helis[h].alpha * trip_dist - helis[h].F;
+                    
+                    // --- FIX PART 2: Use effective_value for new trip gain ---
+                    double new_trip_gain = effective_value - helis[h].alpha * trip_dist - helis[h].F;
                     if (new_trip_gain > best_new_trip_gain) {
                         best_new_trip_gain = new_trip_gain; best_h_for_new_trip = h;
                     }
@@ -574,12 +687,16 @@ void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng) {
             if (best_h_for_new_trip != -1) {
                 int h = best_h_for_new_trip;
                 Trip new_trip; new_trip.stops.push_back(del);
-                new_trip.weight = del_weight; new_trip.value = del_value; new_trip.distance = dist_matrix[helis[h].home_city-1][C+del.village-1] * 2;
+                
+                double raw_del_value = del.d * v_d + del.p * v_p + del.o * v_o;
+                new_trip.weight = del_weight;
+                new_trip.value = raw_del_value;
+                new_trip.distance = dist_matrix[helis[h].home_city-1][C+del.village-1] * 2;
                 
                 s.helis[h].trips.push_back(new_trip);
                 s.helis[h].total_distance += new_trip.distance;
                 s.delivered[del.village-1][0] += del.d; s.delivered[del.village-1][1] += del.p; s.delivered[del.village-1][2] += del.o;
-                s.objective += best_new_trip_gain;
+                s.objective += best_new_trip_gain; // This now uses the CORRECT gain
                 inserted = true;
             }
         }
@@ -590,15 +707,17 @@ void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng) {
             ++it;
         }
     }
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
 }
-
 void repair_random_insert(State &s, Pool &pool, std::mt19937 &rng) {
     shuffle(pool.removed.begin(), pool.removed.end(), rng);
     auto it = pool.removed.begin();
     while(it != pool.removed.end()){
         Delivery del{it->v, it->d, it->p, it->o};
-        double del_value = del.d*v_d + del.p*v_p + del.o*v_o;
+        // We still need the raw value and weight for trip caches and constraints
+        double raw_del_value = del.d*v_d + del.p*v_p + del.o*v_o;
         double del_weight = del.d*w_d + del.p*w_p + del.o*w_o;
+        
         struct FeasibleInsertion { int h,t,pos; double extra_dist; };
         std::vector<FeasibleInsertion> feasible_spots;
 
@@ -619,12 +738,22 @@ void repair_random_insert(State &s, Pool &pool, std::mt19937 &rng) {
         if (!feasible_spots.empty()) {
             std::uniform_int_distribution<int> dist(0, feasible_spots.size()-1);
             FeasibleInsertion spot = feasible_spots[dist(rng)];
+            
+            // --- FIX: Calculate the true effective value BEFORE updating the objective ---
+            double effective_value = calculate_effective_value_change(s, del);
+
+            // Now perform the insertion and update the state
             Trip& trip = s.helis[spot.h].trips[spot.t];
             trip.stops.insert(trip.stops.begin()+spot.pos, del);
-            trip.distance += spot.extra_dist; trip.value += del_value; trip.weight += del_weight;
+            trip.distance += spot.extra_dist;
+            trip.value += raw_del_value; // Trip cache uses raw value
+            trip.weight += del_weight;
+            
             s.helis[spot.h].total_distance += spot.extra_dist;
             s.delivered[del.village-1][0]+=del.d; s.delivered[del.village-1][1]+=del.p; s.delivered[del.village-1][2]+=del.o;
-            s.objective += del_value - helis[spot.h].alpha * spot.extra_dist;
+            
+            // Use the corrected effective_value for the objective update
+            s.objective += effective_value - helis[spot.h].alpha * spot.extra_dist;
             inserted = true;
         }
 
@@ -634,8 +763,8 @@ void repair_random_insert(State &s, Pool &pool, std::mt19937 &rng) {
             ++it;
         }
     }
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
 }
-
 void repair_cluster_build(State &s, Pool &pool, std::mt19937 &rng) {
     std::vector<bool> used(pool.removed.size(), false);
     int remaining = pool.removed.size();
@@ -730,6 +859,7 @@ void repair_cluster_build(State &s, Pool &pool, std::mt19937 &rng) {
             }
         }
     }
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
 }
 
 
@@ -865,6 +995,7 @@ void repair_and_adjust_quantities(State &s, Pool &pool, std::mt19937 &rng) {
             ++it; // No feasible action found for this request, skip it
         }
     }
+    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
 }
 
 // ===================================================================
@@ -1048,12 +1179,13 @@ void print_state(const State& s) {
 
         for (int t = 0; t < helicopter.trips.size(); ++t) {
             const auto& trip = helicopter.trips[t];
-             if (trip.stops.empty()) {
-                // std::cout << "[EMPTY]\n";
+           
+            std::cout << "    - Trip " << t << ": ";
+              if (trip.stops.empty()) {
+                std::cout << "[EMPTY]\n";
                 continue;
             }
 
-            std::cout << "    - Trip " << t << ": ";
            
             // Print the full route
             std::cout << "Route: C" << heli_info.home_city;
@@ -1215,7 +1347,22 @@ State run_alns(State initial, ALNSData &alns){
             case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng); break;
         }
         // print_state(temp);
+                double true_score = obj_func(temp); 
+                    double incremental_score = temp.objective;
 
+        //    if (std::abs(incremental_score - true_score) > 0.01) { // Use a small tolerance
+        //     std::cout << "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
+        //     std::cout << ">>> INCONSISTENCY DETECTED in iteration " << iter << "\n";
+        //     std::cout << "    Used Destroy: " << alns.destroy_names[d_idx] 
+        //               << " | Used Repair: " << alns.repair_names[r_idx] << "\n";
+        //     std::cout << "--------------------------------------------------------\n";
+        //     std::cout << "  - Score after incremental updates: " << incremental_score << "\n";
+        //     std::cout << "  - True score from obj_func():      " << true_score << "\n";
+        //     std::cout << "  - DIFFERENCE:                      " << (incremental_score - true_score) << "\n";
+        //     std::cout << "\n>>> THIS MEANS A DESTROY OR REPAIR FUNCTION HAS A BUG <<<\n";
+        //     std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n";
+        //     // Optional: Pause the program here to inspect the state
+        // }
         double delta = temp.objective - current.objective;
         bool accept = (delta >= 0) || (std::uniform_real_distribution<double>(0,1)(alns.rng) < exp(delta / alns.T));
 
@@ -1314,11 +1461,11 @@ int main(){
     ALNSData alns;
     alns.rng.seed(0); 
 
-    // alns.destroy_names = { random_stop, route_remove, shaw, worst_values_destroyed, perishable_punished };
-    alns.destroy_names = {route_remove };
-    alns.repair_names = { greedy_insert };
+    alns.destroy_names = { random_stop, route_remove, shaw, worst_values_destroyed, perishable_punished };
+    // alns.destroy_names = {random_stop };
+    // alns.repair_names = { greedy_insert };
 
-    // alns.repair_names = { greedy_insert, cluster_build, random_insert, new_insert };
+    alns.repair_names = { greedy_insert, cluster_build, random_insert, new_insert };
 
     alns.weightD.assign(alns.destroy_names.size(), 1.0);
     alns.scoreD.assign(alns.destroy_names.size(), 0.0);
