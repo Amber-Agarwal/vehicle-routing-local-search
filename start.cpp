@@ -1,4 +1,10 @@
-#include <bits/stdc++.h>
+#include <iostream>
+#include <vector>
+#include <array>
+#include <map>
+#include <cmath>
+#include <algorithm>
+
 using namespace std;
 
 struct Village {
@@ -456,7 +462,190 @@ State generate_demand_weighted_initial_state() {
 
 // RECOMMENDED: Use Strategy 1 (Greedy Nearest-Neighbor with Demand Prioritization)
 State generate_initial_state() {
-    return generate_greedy_initial_state();
+    // check objective function from all start states and use the best one
+    State best_state = generate_greedy_initial_state();
+    double best_objective = obj_func(best_state);
+
+    State current_state;
+
+    current_state = generate_cluster_initial_state();
+    double current_objective = obj_func(current_state);
+    if (current_objective > best_objective) {
+        best_objective = current_objective;
+        best_state = current_state;
+    }
+
+    current_state = generate_simple_initial_state();
+    current_objective = obj_func(current_state);
+    if (current_objective > best_objective) {
+        best_objective = current_objective;
+        best_state = current_state;
+    }
+
+    current_state = generate_demand_weighted_initial_state();
+    current_objective = obj_func(current_state);
+    if (current_objective > best_objective) {
+        best_objective = current_objective;
+        best_state = current_state;
+    }
+
+    return best_state;
+}
+
+//Generate neighbours (simple)
+
+State neighbor_swap_villages(const State& state) {
+    State new_state = state;
+
+    // pick two random helicopters
+    int h1 = rand() % H;
+    int h2 = rand() % H;
+    if (h1 == h2) return new_state;
+
+    // pick random trip and random village from each
+    if (new_state.helis[h1].trips.empty() || new_state.helis[h2].trips.empty()) 
+        return new_state;
+
+    Trip& trip1 = new_state.helis[h1].trips[rand() % new_state.helis[h1].trips.size()];
+    Trip& trip2 = new_state.helis[h2].trips[rand() % new_state.helis[h2].trips.size()];
+    if (trip1.stops.empty() || trip2.stops.empty()) return new_state;
+
+    int i1 = rand() % trip1.stops.size();
+    int i2 = rand() % trip2.stops.size();
+
+    // swap deliveries
+    swap(trip1.stops[i1], trip2.stops[i2]);
+
+    return new_state;
+}
+
+State neighbor_reassign_village(const State& state) {
+    State new_state = state;
+
+    int h1 = rand() % H;
+    if (new_state.helis[h1].trips.empty()) return new_state;
+
+    Trip& trip1 = new_state.helis[h1].trips[rand() % new_state.helis[h1].trips.size()];
+    if (trip1.stops.empty()) return new_state;
+
+    int idx = rand() % trip1.stops.size();
+    Delivery moved = trip1.stops[idx];
+    trip1.stops.erase(trip1.stops.begin() + idx);
+
+    int h2 = rand() % H;
+    Trip& trip2 = new_state.helis[h2].trips[rand() % (new_state.helis[h2].trips.size() + 1)];
+
+    // insert at random position
+    int pos = rand() % (trip2.stops.size() + 1);
+    trip2.stops.insert(trip2.stops.begin() + pos, moved);
+
+    return new_state;
+}
+
+
+//2 opt method to optimise dcap thing
+State neighbor_2opt(const State& state) {
+    State new_state = state;
+
+    int h = rand() % H;
+    if (new_state.helis[h].trips.empty()) return new_state;
+
+    Trip& trip = new_state.helis[h].trips[rand() % new_state.helis[h].trips.size()];
+    if (trip.stops.size() < 4) return new_state; // 2-opt needs >= 4
+
+    int i = rand() % (trip.stops.size() - 1);
+    int j = i + 1 + rand() % (trip.stops.size() - i - 1);
+
+    reverse(trip.stops.begin() + i, trip.stops.begin() + j);
+
+    return new_state;
+}
+
+State neighbor_swap_adjacent(const State& state) {
+    State new_state = state;
+
+    int h = rand() % H;
+    if (new_state.helis[h].trips.empty()) return new_state;
+
+    Trip& trip = new_state.helis[h].trips[rand() % new_state.helis[h].trips.size()];
+    if (trip.stops.size() < 2) return new_state;
+
+    int i = rand() % (trip.stops.size() - 1);
+    swap(trip.stops[i], trip.stops[i+1]);
+
+    return new_state;
+}
+
+State neighbor_food_mix(const State& state) {
+    State new_state = state;
+
+    int h = rand() % H;
+    if (new_state.helis[h].trips.empty()) return new_state;
+
+    Trip& trip = new_state.helis[h].trips[rand() % new_state.helis[h].trips.size()];
+    if (trip.stops.empty()) return new_state;
+
+    Delivery& d = trip.stops[rand() % trip.stops.size()];
+
+    if (d.d > 0) {
+        d.d -= 1;
+        d.p += 1; // trade dry for perishable
+    } else if (d.p > 0) {
+        d.p -= 1;
+        d.d += 1; // trade perishable for dry
+    }
+
+    return new_state;
+}
+
+State neighbor_rebalance_other(const State& state) {
+    State new_state = state;
+
+    int h = rand() % H;
+    if (new_state.helis[h].trips.empty()) return new_state;
+
+    Trip& trip = new_state.helis[h].trips[rand() % new_state.helis[h].trips.size()];
+    if (trip.stops.size() < 2) return new_state;
+
+    int i = rand() % trip.stops.size();
+    int j = (i + 1 + rand() % (trip.stops.size() - 1)) % trip.stops.size();
+
+    if (trip.stops[i].o > 0) {
+        trip.stops[i].o -= 1;
+        trip.stops[j].o += 1;
+    }
+
+    return new_state;
+}
+
+
+// Function to print state in the specified output format
+void print_state_solution(const State& state, ostream& out = cout) {
+    for (int h = 0; h < H; h++) {
+        const Helicopter& heli = state.helis[h];
+        
+        out << h + 1 << " " << heli.trips.size() << endl;
+        
+        for (const Trip& trip : heli.trips) {
+            int total_d = 0, total_p = 0, total_o = 0;
+            for (const Delivery& delivery : trip.stops) {
+                total_d += delivery.d;
+                total_p += delivery.p;
+                total_o += delivery.o;
+            }
+            
+            out << total_d << " " << total_p << " " << total_o << " ";
+            
+            out << trip.stops.size() << " ";
+            
+            for (const Delivery& delivery : trip.stops) {
+                out << delivery.village << " " << delivery.d << " " << delivery.p << " " << delivery.o << " ";
+            }
+            out << endl;
+        }
+        
+        out << -1 << endl;
+    }
 }
 
 int main(){
@@ -504,9 +693,38 @@ int main(){
     }
     
     State initial_state = generate_initial_state();
+    print_state_solution(initial_state);
     // Calculate objective (this will fill all the missing fields)
     double result = obj_func(initial_state);
-    cout << "Objective value: " << result << endl;
 
+    cout << "Objective value: " << result << endl;
+    
+    // Create state from the example output
+    State state;
+    state.helis.resize(H);
+    
+    // Helicopter 1, Trip 1@
+    Trip trip1;
+    Delivery delivery1_1 = {1, 9000, 0, 1000}; // Village 1
+    Delivery delivery1_2 = {2, 0, 0, 1000};    // Village 2
+    trip1.stops.push_back(delivery1_1);
+    trip1.stops.push_back(delivery1_2);
+    
+    // Helicopter 1, Trip 2
+    Trip trip2;
+    Delivery delivery2_1 = {2, 8889, 111, 0};  // Village 2
+    trip2.stops.push_back(delivery2_1);
+    
+    // Add trips to helicopter 1
+    state.helis[0].trips.push_back(trip1);
+    state.helis[0].trips.push_back(trip2);
+
+    double result2 = obj_func(state);
+    cout << "Objective value (state): " << result2 << endl;
+    
+    // Print the state in the required format
+    cout << "\nExample output in required format:" << endl;
+    print_state_solution(state);
+    
     return 0;
 }
