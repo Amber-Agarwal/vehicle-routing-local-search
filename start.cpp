@@ -228,12 +228,47 @@ double obj_func(State& state) {
     return state.objective;
 }
 
+Delivery allocate_packages(int v, double cap_left) {
+    int people = villages[v].n;
+    int food_need = 9 * people;
+    int other_need = people;
+
+    struct ItemType {
+        char type;  // 'p', 'd', 'o'
+        double ratio;
+        int need;
+        double w;
+        double v;
+    };
+
+    vector<ItemType> items = {
+        {'p', v_p / w_p, food_need, w_p, v_p},
+        {'d', v_d / w_d, food_need, w_d, v_d},
+        {'o', v_o / w_o, other_need, w_o, v_o}
+    };
+
+    sort(items.begin(), items.end(), [](auto& a, auto& b) {
+        return a.ratio > b.ratio; // highest value/weight first
+    });
+
+    int p = 0, d = 0, o = 0;
+    for (auto &it : items) {
+        int max_units = min(it.need, (int)(cap_left / it.w));
+        cap_left -= max_units * it.w;
+        if (it.type == 'p') p += max_units;
+        if (it.type == 'd') d += max_units;
+        if (it.type == 'o') o += max_units;
+    }
+
+    return {v + 1, d, p, o}; // 1-indexed
+}
+
+
 // Strategy 1: GREEDY NEAREST-NEIGHBOR WITH DEMAND PRIORITIZATION (RECOMMENDED)
 State generate_greedy_initial_state() {
     State state;
     state.helis.resize(H);
-    
-    // Calculate demand priority for each village (people * distance from nearest city)
+
     vector<pair<double, int>> village_priority;
     for (int v = 0; v < V; v++) {
         double min_dist = INFINITY;
@@ -241,88 +276,59 @@ State generate_greedy_initial_state() {
             double dist = calculate_distance(cities[c], {villages[v].x, villages[v].y});
             min_dist = min(min_dist, dist);
         }
-        // Priority = demand / accessibility (higher = more urgent)
         double priority = (villages[v].n * 9.0) / (min_dist + 1.0);
         village_priority.push_back({priority, v});
     }
-    sort(village_priority.rbegin(), village_priority.rend()); // Descending priority
-    
+    sort(village_priority.rbegin(), village_priority.rend());
+
     vector<bool> village_served(V, false);
-    
+
     for (int h = 0; h < H; h++) {
         pair<double, double> home_pos = cities[helis[h].home_city - 1];
-        
+
         while (true) {
-            // Find nearest unserved village from current position
             int best_village = -1;
             double best_distance = INFINITY;
-            
+
             for (auto& [priority, v] : village_priority) {
                 if (village_served[v]) continue;
-                
-                pair<double, double> village_pos = {villages[v].x, villages[v].y};
-                double dist = calculate_distance(home_pos, village_pos);
-                
+                double dist = calculate_distance(home_pos, {villages[v].x, villages[v].y});
                 if (dist < best_distance) {
                     best_distance = dist;
                     best_village = v;
                 }
             }
-            
-            if (best_village == -1) break; // No more villages
-            
-            // Create a trip to this village
+            if (best_village == -1) break;
+
             Trip trip;
-            
-            // Calculate optimal package allocation
-            int people = villages[best_village].n;
-            int food_needed = people * 9;
-            int other_needed = people * 1;
-            
-            // Maximize value: prefer perishable food
-            int perishable_packets = min(food_needed, (int)(helis[h].w_cap / w_p));
-            int remaining_food = food_needed - perishable_packets;
-            
-            double remaining_capacity = helis[h].w_cap - perishable_packets * w_p;
-            int dry_packets = min(remaining_food, (int)(remaining_capacity / w_d));
-            
-            remaining_capacity -= dry_packets * w_d;
-            int other_packets = min(other_needed, (int)(remaining_capacity / w_o));
-            
-            // Check if trip is feasible
+            Delivery delivery = allocate_packages(best_village, helis[h].w_cap);
+
             double trip_dist = 2 * calculate_distance(home_pos, {villages[best_village].x, villages[best_village].y});
             if (trip_dist <= helis[h].dcap && 
-                (perishable_packets * w_p + dry_packets * w_d + other_packets * w_o) <= helis[h].w_cap) {
-                
-                Delivery delivery = {best_village + 1, dry_packets, perishable_packets, other_packets}; // 1-indexed
+                (delivery.d*w_d + delivery.p*w_p + delivery.o*w_o) <= helis[h].w_cap) {
                 trip.stops.push_back(delivery);
                 state.helis[h].trips.push_back(trip);
             }
-            
             village_served[best_village] = true;
         }
     }
-    
     return state;
 }
+
 
 // Strategy 2: CAPACITY-BASED CLUSTERING
 State generate_cluster_initial_state() {
     State state;
     state.helis.resize(H);
-    
-    // Assign villages to helicopters based on distance to home cities
+
     vector<vector<int>> heli_villages(H);
-    
+
     for (int v = 0; v < V; v++) {
         double best_distance = INFINITY;
         int best_heli = 0;
-        
         for (int h = 0; h < H; h++) {
-            pair<double, double> home_pos = cities[helis[h].home_city - 1];
-            pair<double, double> village_pos = {villages[v].x, villages[v].y};
-            double dist = calculate_distance(home_pos, village_pos);
-            
+            double dist = calculate_distance(cities[helis[h].home_city - 1],
+                                             {villages[v].x, villages[v].y});
             if (dist < best_distance) {
                 best_distance = dist;
                 best_heli = h;
@@ -330,35 +336,23 @@ State generate_cluster_initial_state() {
         }
         heli_villages[best_heli].push_back(v);
     }
-    
-    // Create trips for each helicopter
+
     for (int h = 0; h < H; h++) {
-        if (heli_villages[h].empty()) continue;
-        
-        // Sort villages by distance from home
         pair<double, double> home_pos = cities[helis[h].home_city - 1];
-        sort(heli_villages[h].begin(), heli_villages[h].end(), 
+        sort(heli_villages[h].begin(), heli_villages[h].end(),
              [&](int v1, int v2) {
-                 double d1 = calculate_distance(home_pos, {villages[v1].x, villages[v1].y});
-                 double d2 = calculate_distance(home_pos, {villages[v2].x, villages[v2].y});
-                 return d1 < d2;
+                 return calculate_distance(home_pos, {villages[v1].x, villages[v1].y}) <
+                        calculate_distance(home_pos, {villages[v2].x, villages[v2].y});
              });
-        
-        // Create single-village trips (simple approach)
+
         for (int v : heli_villages[h]) {
             Trip trip;
-            
-            // Simple allocation: try to meet basic needs
-            int people = villages[v].n;
-            int food_packets = min(people * 9, (int)(helis[h].w_cap / w_p));
-            int other_packets = min(people * 1, (int)((helis[h].w_cap - food_packets * w_p) / w_o));
-            
-            Delivery delivery = {v + 1, 0, food_packets, other_packets}; // 1-indexed, prefer perishable
-            trip.stops.push_back(delivery);
+            Delivery delivery = allocate_packages(v, helis[h].w_cap);
+            if (delivery.d + delivery.p + delivery.o > 0)
+                trip.stops.push_back(delivery);
             state.helis[h].trips.push_back(trip);
         }
     }
-    
     return state;
 }
 
@@ -366,26 +360,15 @@ State generate_cluster_initial_state() {
 State generate_simple_initial_state() {
     State state;
     state.helis.resize(H);
-    
-    // Assign villages to helicopters in round-robin fashion
+
     for (int v = 0; v < V; v++) {
-        int h = v % H; // Simple round-robin assignment
-        
+        int h = v % H;
         Trip trip;
-        
-        // Basic package allocation
-        int people = villages[v].n;
-        double max_weight = helis[h].w_cap;
-        
-        // Try to allocate optimally within weight limits
-        int perishable = min(people * 9, (int)(max_weight / (2 * w_p))); // Leave room for other
-        int other = min(people * 1, (int)((max_weight - perishable * w_p) / w_o));
-        
-        Delivery delivery = {v + 1, 0, perishable, other}; // 1-indexed
-        trip.stops.push_back(delivery);
+        Delivery delivery = allocate_packages(v, helis[h].w_cap);
+        if (delivery.d + delivery.p + delivery.o > 0)
+            trip.stops.push_back(delivery);
         state.helis[h].trips.push_back(trip);
     }
-    
     return state;
 }
 
@@ -393,69 +376,46 @@ State generate_simple_initial_state() {
 State generate_demand_weighted_initial_state() {
     State state;
     state.helis.resize(H);
-    
-    // Calculate total demand
+
     double total_demand = 0;
-    for (int v = 0; v < V; v++) {
-        total_demand += villages[v].n * 9; // Food demand
-    }
-    
-    // Calculate helicopter capacity ratios
+    for (int v = 0; v < V; v++) total_demand += villages[v].n * 9;
+
     double total_capacity = 0;
-    for (int h = 0; h < H; h++) {
-        total_capacity += helis[h].w_cap;
-    }
-    
-    // Assign villages proportionally
+    for (int h = 0; h < H; h++) total_capacity += helis[h].w_cap;
+
     vector<bool> assigned(V, false);
+
     for (int h = 0; h < H; h++) {
-        double heli_ratio = helis[h].w_cap / total_capacity;
-        double target_demand = total_demand * heli_ratio;
+        double target_demand = total_demand * (helis[h].w_cap / total_capacity);
         double current_demand = 0;
-        
-        pair<double, double> home_pos = cities[helis[h].home_city - 1];
-        
-        // Find nearest villages until capacity is roughly matched
+
+        pair<double,double> home_pos = cities[helis[h].home_city - 1];
+
         while (current_demand < target_demand) {
             int best_village = -1;
             double best_distance = INFINITY;
-            
             for (int v = 0; v < V; v++) {
                 if (assigned[v]) continue;
-                
-                pair<double, double> village_pos = {villages[v].x, villages[v].y};
-                double dist = calculate_distance(home_pos, village_pos);
-                
+                double dist = calculate_distance(home_pos, {villages[v].x, villages[v].y});
                 if (dist < best_distance) {
                     best_distance = dist;
                     best_village = v;
                 }
             }
-            
             if (best_village == -1) break;
-            
-            // Create trip for this village
+
             Trip trip;
-            int people = villages[best_village].n;
-            int food_needed = people * 9;
-            current_demand += food_needed;
-            
-            // Allocate packages
-            int perishable = min(food_needed, (int)(helis[h].w_cap / w_p));
-            int other = min(people, (int)((helis[h].w_cap - perishable * w_p) / w_o));
-            
-            Delivery delivery = {best_village + 1, 0, perishable, other}; // 1-indexed
-            trip.stops.push_back(delivery);
+            Delivery delivery = allocate_packages(best_village, helis[h].w_cap);
+            if (delivery.d + delivery.p + delivery.o > 0)
+                trip.stops.push_back(delivery);
+
             state.helis[h].trips.push_back(trip);
-            
+            current_demand += villages[best_village].n * 9;
             assigned[best_village] = true;
         }
     }
-    
     return state;
 }
-
-
 
 
 void two_opt_people_weighted(vector<int>& trip_villages, int home_city) {
@@ -501,14 +461,17 @@ State generate_randomized_initial_state() {
 
     vector<int> order(V);
     iota(order.begin(), order.end(), 0);
-    random_shuffle(order.begin(), order.end());
+
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(order.begin(), order.end(), g);
 
     for (int h=0; h<H; h++) {
         vector<int> assigned;
         for (int v: order) if (rand()%H==h) assigned.push_back(v);
         if (assigned.empty()) continue;
 
-        random_shuffle(assigned.begin(),assigned.end());
+        std::shuffle(assigned.begin(), assigned.end(), g);
 
         vector<vector<int>> trips;
         vector<int> cur;
@@ -528,16 +491,12 @@ State generate_randomized_initial_state() {
             Trip trip;
             double cap_left = helis[h].w_cap;
             for (int v: tv) {
-                int people=villages[v].n;
-                int food_need=9*people, other_need=people;
-                int p = min(food_need,(int)(cap_left/w_p));
-                cap_left -= p*w_p; food_need -= p;
-                int d = min(food_need,(int)(cap_left/w_d));
-                cap_left -= d*w_d;
-                int o = min(other_need,(int)(cap_left/w_o));
-                cap_left -= o*w_o;
-                if(p+d+o>0) trip.stops.push_back({v+1,d,p,o});
-                if(cap_left<=0) break;
+                Delivery del = allocate_packages(v, cap_left);
+                if (del.d+del.p+del.o > 0) {
+                    trip.stops.push_back(del);
+                    cap_left -= del.d*w_d + del.p*w_p + del.o*w_o;
+                }
+                if (cap_left <= 0) break;
             }
             fill_trip_data(h,trip);
             state.helis[h].trips.push_back(trip);
@@ -614,6 +573,8 @@ double trip_cost(const Trip& trip, int heli_id) {
 
 State neighbor_swap_villages(const State& state) {
     State new_state = state;
+
+    if (H < 2) return new_state; // need at least 2 helicopters
 
     int h1 = rand() % H, h2 = rand() % H;
     if (h1 == h2) return new_state;
@@ -708,11 +669,178 @@ State neighbor_swap_villages(const State& state) {
                         - old_cost1 - old_cost2
                         + new_cost1 + new_cost2;
 
+    if(new_state.helis[h1].total_distance > DMax + 1e-9 || new_state.helis[h2].total_distance > DMax + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(trip1.weight > helis[h1].w_cap + 1e-9 || trip2.weight > helis[h2].w_cap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(trip1.distance > helis[h1].dcap + 1e-9 || trip2.distance > helis[h2].dcap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    // new_state.objective = obj_func(new_state); // double-check
+
     return new_state;
 }
 
+
 State neighbor_reassign_village(const State& state) {
     State new_state = state;
+    if (H == 0) return new_state;
+
+    // Find all non-empty deliveries
+    vector<tuple<int, int, int>> candidates; // (heli, trip, delivery_idx)
+    for (int h = 0; h < H; h++) {
+        for (int t = 0; t < (int)new_state.helis[h].trips.size(); t++) {
+            for (int d = 0; d < (int)new_state.helis[h].trips[t].stops.size(); d++) {
+                candidates.push_back({h, t, d});
+            }
+        }
+    }
+    
+    if (candidates.empty()) return new_state;
+
+    int rand_idx = rand() % candidates.size();
+    auto [h1, t1, d_idx] = candidates[rand_idx];
+    
+    Trip& source_trip = new_state.helis[h1].trips[t1];
+    Delivery moved = source_trip.stops[d_idx];
+    int v = moved.village - 1;
+
+    int h2 = rand() % H;
+    
+    // Avoid degenerate case
+    if (h1 == h2 && new_state.helis[h1].trips.size() == 1 && source_trip.stops.size() == 1) {
+        return new_state;
+    }
+
+    // -------- Save OLD values for incremental update --------
+    double old_village_value = village_value(v, new_state.delivered[v]);
+    double old_cost1 = (source_trip.stops.size() == 1) ? 0.0 : (helis[h1].F + helis[h1].alpha * source_trip.distance);
+    
+    // -------- Remove from source trip --------
+    new_state.delivered[v][0] -= moved.d;
+    new_state.delivered[v][1] -= moved.p;
+    new_state.delivered[v][2] -= moved.o;
+
+    // Update source trip
+    if (source_trip.stops.size() == 1) {
+        // Trip becomes empty
+        new_state.helis[h1].total_distance -= source_trip.distance;
+        source_trip.distance = 0;
+        source_trip.weight = 0;
+        source_trip.value = 0;
+        source_trip.stops.clear();
+    } else {
+        // CALCULATE POSITIONS BEFORE MODIFYING THE VECTOR
+        pair<double,double> home1 = cities[helis[h1].home_city-1];
+        
+        pair<double,double> prev = (d_idx == 0) ? home1 : 
+            make_pair(villages[source_trip.stops[d_idx-1].village-1].x, villages[source_trip.stops[d_idx-1].village-1].y);
+        pair<double,double> next = (d_idx == source_trip.stops.size()-1) ? home1 :
+            make_pair(villages[source_trip.stops[d_idx+1].village-1].x, villages[source_trip.stops[d_idx+1].village-1].y);
+        auto pos_moved = make_pair(villages[moved.village-1].x, villages[moved.village-1].y);
+
+        double delta = -calculate_distance(prev, pos_moved) - calculate_distance(pos_moved, next)
+                       + calculate_distance(prev, next);
+        
+        source_trip.distance += delta;
+        new_state.helis[h1].total_distance += delta;
+        
+        // Update weight and value
+        source_trip.weight -= moved.d * w_d + moved.p * w_p + moved.o * w_o;
+        source_trip.value -= moved.d * v_d + moved.p * v_p + moved.o * v_o;
+        
+        // Remove delivery AFTER calculating positions
+        source_trip.stops.erase(source_trip.stops.begin() + d_idx);
+    }
+
+    // -------- Add to target helicopter --------
+    Trip* target_trip_ptr;
+    bool target_was_empty = false;
+    
+    if (new_state.helis[h2].trips.empty() || (rand() % 3 == 0)) {
+        new_state.helis[h2].trips.push_back(Trip());
+        target_trip_ptr = &new_state.helis[h2].trips.back();
+        target_was_empty = true;
+    } else {
+        target_trip_ptr = &new_state.helis[h2].trips[rand() % new_state.helis[h2].trips.size()];
+        target_was_empty = target_trip_ptr->stops.empty();
+    }
+    
+    Trip& target_trip = *target_trip_ptr;
+    double old_cost2 = target_was_empty ? 0.0 : (helis[h2].F + helis[h2].alpha * target_trip.distance);
+
+    // Insert delivery
+    int pos = rand() % (target_trip.stops.size() + 1);
+    target_trip.stops.insert(target_trip.stops.begin() + pos, moved);
+
+    // Update target trip
+    if (target_trip.stops.size() == 1) {
+        // First delivery in empty trip
+        pair<double,double> home2 = cities[helis[h2].home_city-1];
+        auto pos_moved = make_pair(villages[moved.village-1].x, villages[moved.village-1].y);
+        target_trip.distance = 2 * calculate_distance(home2, pos_moved);
+        new_state.helis[h2].total_distance += target_trip.distance;
+    } else {
+        // Insert into existing route
+        pair<double,double> home2 = cities[helis[h2].home_city-1];
+        
+        pair<double,double> prev = (pos == 0) ? home2 :
+            make_pair(villages[target_trip.stops[pos-1].village-1].x, villages[target_trip.stops[pos-1].village-1].y);
+        pair<double,double> next = (pos == target_trip.stops.size()-1) ? home2 :
+            make_pair(villages[target_trip.stops[pos+1].village-1].x, villages[target_trip.stops[pos+1].village-1].y);
+        auto pos_moved = make_pair(villages[moved.village-1].x, villages[moved.village-1].y);
+
+        double delta = -calculate_distance(prev, next)
+                       + calculate_distance(prev, pos_moved) + calculate_distance(pos_moved, next);
+        target_trip.distance += delta;
+        new_state.helis[h2].total_distance += delta;
+    }
+
+    target_trip.weight += moved.d * w_d + moved.p * w_p + moved.o * w_o;
+    target_trip.value += moved.d * v_d + moved.p * v_p + moved.o * v_o;
+
+    // -------- Update delivered totals (add back) --------
+    new_state.delivered[v][0] += moved.d;
+    new_state.delivered[v][1] += moved.p;
+    new_state.delivered[v][2] += moved.o;
+
+    // -------- Clean up empty trips from source helicopter --------
+    auto& trips = new_state.helis[h1].trips;
+    trips.erase(remove_if(trips.begin(), trips.end(), 
+                         [](const Trip& t) { return t.stops.empty(); }), 
+                trips.end());
+
+    // -------- Calculate NEW values for incremental update --------
+    double new_village_value = village_value(v, new_state.delivered[v]);
+    double new_cost1 = 0.0;
+    if (!new_state.helis[h1].trips.empty()) {
+        // Find the trip that was modified (if it still exists)
+        bool found_modified_trip = false;
+        for (const Trip& trip : new_state.helis[h1].trips) {
+            if (!trip.stops.empty() && trip.distance > 0) {
+                new_cost1 += helis[h1].F + helis[h1].alpha * trip.distance;
+            }
+        }
+    }
+    
+    double new_cost2 = helis[h2].F + helis[h2].alpha * target_trip.distance;
+
+    // -------- Update objective incrementally --------
+    new_state.objective = state.objective
+                        - old_village_value + new_village_value
+                        - old_cost1 - old_cost2
+                        + new_cost1 + new_cost2;
+
+    new_state.objective = obj_func(new_state); // double-check
+
+    return new_state;
+}
+
+State neighbor_reassign_village2(const State& state) {
+    State new_state = state;
+    if (H == 0) return new_state;
 
     int h1 = rand() % H;
     if (new_state.helis[h1].trips.empty()) return new_state;
@@ -810,6 +938,8 @@ State neighbor_reassign_village(const State& state) {
                         - old_cost1 - old_cost2
                         + new_cost1 + new_cost2;
 
+    new_state.objective = obj_func(new_state); // double-check
+
     return new_state;
 }
 
@@ -818,6 +948,7 @@ State neighbor_reassign_village(const State& state) {
 //2 opt method to optimise dcap thing
 State neighbor_2opt(const State& state) {
     State new_state = state;
+    if (H == 0) return new_state;
 
     int h = rand() % H;
     if (new_state.helis[h].trips.empty()) return new_state;
@@ -862,6 +993,17 @@ State neighbor_2opt(const State& state) {
     // -------- Update objective incrementally --------
     double new_cost = trip_cost(trip, h);
     new_state.objective = state.objective - old_cost + new_cost;
+
+    if(new_state.helis[h].total_distance > DMax + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(trip.weight > helis[h].w_cap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(trip.distance > helis[h].dcap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    // new_state.objective = obj_func(new_state); // double-check
 
     return new_state;
 }
@@ -917,11 +1059,18 @@ State neighbor_swap_adjacent(const State& state) {
     double new_cost = trip_cost(trip, h);
     new_state.objective = state.objective - old_cost + new_cost;
 
+
+    if(new_state.helis[h].total_distance > DMax + 1e-9 || trip.weight > helis[h].w_cap + 1e-9 || trip.distance > helis[h].dcap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    //new_state.objective = obj_func(new_state); // double-check
+
     return new_state;
 }
 
 State neighbor_food_mix(const State& state) {
     State new_state = state;
+    if (H == 0) return new_state;
 
     int h = rand() % H;
     if (new_state.helis[h].trips.empty()) return new_state;
@@ -931,6 +1080,7 @@ State neighbor_food_mix(const State& state) {
 
     int idx = rand() % trip.stops.size();
     Delivery& d = trip.stops[idx];
+    if (d.d == 0 && d.p == 0) return new_state; // nothing to swap
     int v = d.village - 1;
 
     // -------- Save old contributions --------
@@ -968,12 +1118,24 @@ State neighbor_food_mix(const State& state) {
                         - old_val_v + new_val_v
                         - old_cost + new_cost;  // effectively cancels, since cost same
 
+    if(new_state.helis[h].total_distance > DMax + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(trip.weight > helis[h].w_cap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(trip.distance > helis[h].dcap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    // new_state.objective = obj_func(new_state); // double-check
+
     return new_state;
 }
 
 
 State neighbor_rebalance_other(const State& state) {
     State new_state = state;
+    if (H == 0) return new_state;
 
     int h = rand() % H;
     if (new_state.helis[h].trips.empty()) return new_state;
@@ -1014,6 +1176,11 @@ State neighbor_rebalance_other(const State& state) {
                         + new_val_i + new_val_j
                         - old_cost + new_cost;
 
+    if(new_state.helis[h].total_distance > DMax + 1e-9 || trip.weight > helis[h].w_cap + 1e-9 || trip.distance > helis[h].dcap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    //new_state.objective = obj_func(new_state); // double-check
+
     return new_state;
 }
 
@@ -1029,12 +1196,16 @@ int biased_random_choice(const vector<double>& weights) {
     return weights.size()-1;
 }
 
-State neighbor_remove_village(const State& state) {
+State neighbor_remove_village2(const State& state) {
     State new_state=state;
     vector<pair<int,int>> candidates;
-    for(int h=0;h<H;h++) for(int t=0;t<(int)new_state.helis[h].trips.size();t++)
-        if(!new_state.helis[h].trips[t].stops.empty()) candidates.push_back({h,t});
-    if(candidates.empty()) return new_state;
+    for (int h=0; h<H; h++) {
+            for (int t=0; t<(int)new_state.helis[h].trips.size(); t++) {
+                if (!new_state.helis[h].trips[t].stops.empty())
+                    candidates.push_back({h,t});
+            }
+        }
+    if (candidates.empty()) return new_state;
 
     vector<double> weights;
     vector<pair<int,int>> chosen;
@@ -1074,11 +1245,114 @@ State neighbor_remove_village(const State& state) {
     double new_val=village_value(v,new_state.delivered[v]);
     double new_cost=(trip.stops.empty()?0.0:trip_cost(trip,h));
     new_state.objective=state.objective-old_val+new_val-old_cost+new_cost;
+    new_state.objective = obj_func(new_state); // double-check
+    return new_state;
+}
+
+State neighbor_remove_village(const State& state) {
+    State new_state = state;
+    
+    // Find all non-empty deliveries
+    vector<tuple<int, int, int>> candidates;
+    for (int h = 0; h < H; h++) {
+        for (int t = 0; t < (int)new_state.helis[h].trips.size(); t++) {
+            for (int d = 0; d < (int)new_state.helis[h].trips[t].stops.size(); d++) {
+                candidates.push_back({h, t, d});
+            }
+        }
+    }
+    
+    if (candidates.empty()) return new_state;
+
+    int rand_idx = rand() % candidates.size();
+    auto [h, t, d_idx] = candidates[rand_idx];
+    
+    Trip& trip = new_state.helis[h].trips[t];
+    Delivery removed = trip.stops[d_idx];
+    int v = removed.village - 1;
+
+    // -------- Save OLD values --------
+    double old_village_value = village_value(v, new_state.delivered[v]);
+    double old_cost = trip.stops.empty() ? 0.0 : (helis[h].F + helis[h].alpha * trip.distance);
+
+    // -------- Update delivered totals --------
+    new_state.delivered[v][0] -= removed.d;
+    new_state.delivered[v][1] -= removed.p;
+    new_state.delivered[v][2] -= removed.o;
+
+    // -------- Handle single vs multiple stops differently --------
+    bool trip_will_be_empty = (trip.stops.size() == 1);
+    
+    if (trip_will_be_empty) {
+        // Trip becomes completely empty
+        new_state.helis[h].total_distance -= trip.distance;
+        trip.distance = 0;
+        trip.weight = 0;
+        trip.value = 0;
+        trip.stops.clear();
+        
+        // Remove empty trip immediately
+        new_state.helis[h].trips.erase(new_state.helis[h].trips.begin() + t);
+    } else {
+        // CALCULATE POSITIONS BEFORE MODIFYING THE VECTOR
+        pair<double,double> home = cities[helis[h].home_city-1];
+        
+        pair<double,double> prev = (d_idx == 0) ? home :
+            make_pair(villages[trip.stops[d_idx-1].village-1].x, villages[trip.stops[d_idx-1].village-1].y);
+        pair<double,double> next = (d_idx == trip.stops.size()-1) ? home :
+            make_pair(villages[trip.stops[d_idx+1].village-1].x, villages[trip.stops[d_idx+1].village-1].y);
+        auto pos_removed = make_pair(villages[removed.village-1].x, villages[removed.village-1].y);
+
+        double delta = -calculate_distance(prev, pos_removed) - calculate_distance(pos_removed, next)
+                       + calculate_distance(prev, next);
+        
+        trip.distance += delta;
+        new_state.helis[h].total_distance += delta;
+        
+        trip.weight -= removed.d * w_d + removed.p * w_p + removed.o * w_o;
+        trip.value -= removed.d * v_d + removed.p * v_p + removed.o * v_o;
+        
+        // Remove delivery AFTER calculating positions
+        trip.stops.erase(trip.stops.begin() + d_idx);
+    }
+
+    // -------- Calculate NEW values --------
+    double new_village_value = village_value(v, new_state.delivered[v]);
+    double new_cost = trip_will_be_empty ? 0.0 : (helis[h].F + helis[h].alpha * trip.distance);
+    // double new_cost;
+    // if (trip_will_be_empty) {
+    //     // The new cost is 0 because the trip is gone.
+    //     new_cost = 0.0;
+        
+    //     // NOW perform the erase operation that invalidates the reference.
+    //     new_state.helis[h].trips.erase(new_state.helis[h].trips.begin() + t);
+    // } else {
+    //     // The trip reference is still valid here, as we only erased from trip.stops.
+    //     new_cost = helis[h].F + helis[h].alpha * trip.distance;
+    // }
+
+    // -------- Update objective incrementally --------
+    new_state.objective = state.objective
+                        - old_village_value + new_village_value
+                        - old_cost + new_cost;
+
+    if(new_state.helis[h].total_distance > DMax + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(!trip.stops.empty() && trip.weight > helis[h].w_cap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    if(!trip.stops.empty() && trip.distance > helis[h].dcap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    // new_state.objective = obj_func(new_state); // double-check
+
     return new_state;
 }
 
 State neighbor_add_village(const State& state) {
     State new_state=state;
+    if (H == 0 || V == 0) return new_state;
     vector<int> candidates; vector<double> weights;
     for(int v=0;v<V;v++) if(new_state.delivered[v][0]+new_state.delivered[v][1]+new_state.delivered[v][2]==0) {
         candidates.push_back(v); weights.push_back(villages[v].n);
@@ -1121,22 +1395,95 @@ State neighbor_add_village(const State& state) {
     double new_val=village_value(v,new_state.delivered[v]);
     double new_cost=trip_cost(trip,h);
     new_state.objective=state.objective-old_val+new_val-old_cost+new_cost;
+
+    if(new_state.helis[h].total_distance > DMax + 1e-9 || trip.weight > helis[h].w_cap + 1e-9 || trip.distance > helis[h].dcap + 1e-9){
+        new_state.objective = -INFINITY;
+    }
+    //new_state.objective = obj_func(new_state); // double-check
     return new_state;
 }
 
 State generate_random_neighbor(const State& current) {
-    int choice = rand()%7; // 7 neighbors now
+    int choice = rand()%6; // 6 neighbors now
     switch(choice){
-        case 0: return neighbor_reassign_village(current);
+        // case 0: return neighbor_reassign_village(current);
+        // case 1: return neighbor_2opt(current);
+        // case 2: return neighbor_swap_adjacent(current);
+        // case 3: return neighbor_food_mix(current);
+        // case 4: return neighbor_rebalance_other(current);
+        // case 5: return neighbor_remove_village(current);
+        // case 6: return neighbor_add_village(current);
+        case 0: return neighbor_add_village(current);
         case 1: return neighbor_2opt(current);
         case 2: return neighbor_swap_adjacent(current);
         case 3: return neighbor_food_mix(current);
         case 4: return neighbor_rebalance_other(current);
         case 5: return neighbor_remove_village(current);
-        case 6: return neighbor_add_village(current);
     }
     return current;
 }
+
+
+State simulated_annealing(
+    int max_iterations,
+    double start_temp,
+    double end_temp,
+    double cooling_rate,
+    int neighbor_samples // number of neighbors to sample per iteration
+) {
+    // Initialize
+    State current = generate_randomized_initial_state();
+    obj_func(current); // ensure objective is valid
+    State best = current;
+
+    double T = start_temp;
+
+    for (int iter = 0; iter < max_iterations && T > end_temp; iter++) {
+        // --- pick best neighbor (do not include current) ---
+        State candidate = generate_random_neighbor(current);
+        for (int s = 1; s < neighbor_samples; s++) { // already have one neighbor
+            State neighbor = generate_random_neighbor(current);
+            if (neighbor.objective > candidate.objective) {
+                candidate = neighbor;
+            }
+        }
+
+        double delta = candidate.objective - current.objective;
+
+        if (delta > 0) {
+            // Accept improvement
+            current = candidate;
+        } else {
+            // Accept worse with probability exp(delta/T)
+            double prob = exp(delta / T);
+            double r = (double)rand() / RAND_MAX;
+            if (r < prob) {
+                current = candidate;
+            }
+        }
+
+        // --- consistency check every 100 iterations and last iteration ---
+        if (iter % 100 == 0 || iter == max_iterations - 1) {
+            double check = obj_func(current);
+            if (fabs(check - current.objective) > 1e-6) {
+                cerr << "Warning: mismatch at iter " << iter 
+                     << " diff=" << (check - current.objective) << endl;
+                current.objective = check; // resync
+            }
+        }
+
+        // Update best
+        if (current.objective > best.objective) {
+            best = current;
+        }
+
+        // Cooling schedule
+        T *= cooling_rate;
+    }
+
+    return best;
+}
+
 
 // ---------- Hill climbing with random restarts + patience ----------
 State hill_climb_with_random_restart(int max_restarts, int patience, int neighbor_samples) {
@@ -1145,7 +1492,14 @@ State hill_climb_with_random_restart(int max_restarts, int patience, int neighbo
 
     for (int r = 0; r < max_restarts; r++) {
         // start from randomized initial
-        State current = generate_randomized_initial_state();
+        State current;
+        // if(r==0){
+        //     current = generate_initial_state();
+        // }
+        // else{
+        //     current = generate_randomized_initial_state();
+        // }
+        current = generate_randomized_initial_state();
         obj_func(current);
 
         int no_improve = 0;
@@ -1156,6 +1510,10 @@ State hill_climb_with_random_restart(int max_restarts, int patience, int neighbo
             // sample multiple neighbors, pick best
             for (int s = 0; s < neighbor_samples; s++) {
                 State neighbor = generate_random_neighbor(current);
+                // double check = obj_func(neighbor); // recompute from scratch
+                // if (fabs(check - neighbor.objective) > 1e-6) {
+                //     cerr << "Mismatch detected! diff=" << (check - neighbor.objective) << endl;
+                // }
                 if (neighbor.objective > best_neighbor.objective) {
                     best_neighbor = neighbor;
                     improved = true;
@@ -1252,17 +1610,23 @@ int main(){
         test_state.helis[h].total_distance = 0.0;
     }
     
-
-    State best = hill_climb_with_random_restart(10, 100, 50); // 10 restarts, patience=100
+    State best = hill_climb_with_random_restart(100, 50, 1000); // 10 restarts, patience=100
     print_state_solution(best);
     cout << "Final Objective value: " << best.objective << endl;
+    cout << "Final Objective value (confirming): " << obj_func(best) << endl;
 
-    State initial_state = generate_initial_state();
-    print_state_solution(initial_state);
+    State best2 = simulated_annealing(10000,100,0.01,0.995,5);
+    print_state_solution(best2);
+    cout << "Final Objective value: " << best2.objective << endl;
+    cout << "Final Objective value (confirming): " << obj_func(best2) << endl;
+
+
+    // State initial_state = generate_initial_state();
+    // print_state_solution(initial_state);
     // Calculate objective (this will fill all the missing fields)
-    double result = obj_func(initial_state);
+    //double result = obj_func(initial_state);
 
-    cout << "Objective value: " << result << endl;
+    //cout << "Objective value: " << result << endl;
     
     // Create state from the example output
     State state;
