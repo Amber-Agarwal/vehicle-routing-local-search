@@ -8,10 +8,11 @@
 #include <iomanip>
 #include <fstream>
 #include<bits/stdc++.h>
- using namespace std ;
+using namespace std ;
 // ===================================================================
 // DATA STRUCTURES & GLOBAL VARIABLES
 // ===================================================================
+vector<double> weight_of_permu(6,1);
 
 struct Village {
     double x;
@@ -308,10 +309,6 @@ void remove_stop_from_trip(State& s, Pool& pool, const Stop_tracking& ref) {
     }
 }
 #include <climits>
-
-// Greedy allocator that picks packet types by value-per-weight density,
-// respects village limits, current delivered counts, helicopter spare weight,
-// and (optionally) per-type availability limits (max_d/max_p/max_o).
 Delivery allocate_best_delivery(int village_id, State &s, int heli_id,
                                      double spare_weight,
                                      int max_d = INT_MAX, int max_p = INT_MAX, int max_o = INT_MAX) {
@@ -374,6 +371,73 @@ Delivery allocate_best_delivery(int village_id, State &s, int heli_id,
             best_value = val;
             best = cur;
         }
+    }
+
+    return best;
+}
+vector<vector<int>> arr = {
+    {0,1,2},
+    {0,2,1},
+    {1,2,0},
+    {1,0,2},
+    {2,1,0},
+    {2,0,1}
+};
+// Greedy allocator that picks packet types by value-per-weight density,
+// respects village limits, current delivered counts, helicopter spare weight,
+// and (optionally) per-type availability limits (max_d/max_p/max_o).
+Delivery allocate_best_delivery(int village_id, State &s, int heli_id,
+                                double spare_weight,
+                                const std::vector<int> &order,
+                                int max_d = INT_MAX, int max_p = INT_MAX, int max_o = INT_MAX) {
+    int v_idx = village_id - 1;
+    int people = villages[v_idx].n;
+
+    int food_limit = 9 * people;
+    int other_limit = people;
+
+    int already_d = s.delivered[v_idx][0];
+    int already_p = s.delivered[v_idx][1];
+    int already_o = s.delivered[v_idx][2];
+
+    int food_remaining = std::max(0, food_limit - (already_d + already_p));
+    int other_remaining = std::max(0, other_limit - already_o);
+
+    Delivery best = {village_id, 0, 0, 0};
+    double best_value = -1;
+
+    if (spare_weight + 1e-12 < std::min({w_d, w_p, w_o})) return best;
+    if (food_remaining <= 0 && other_remaining <= 0) return best;
+
+    double sw = spare_weight;
+    int fd = std::min(food_remaining, max_d);
+    int fp = std::min(food_remaining, max_p);
+    int fo = std::min(other_remaining, max_o);
+
+    Delivery cur = {village_id, 0, 0, 0};
+
+    for (int t : order) {
+        if (t == 0) { // dry
+            int give = std::min(fd, (int)(sw / w_d));
+            cur.d += give; sw -= give * w_d;
+            fd -= give; food_remaining -= give;
+            fp = std::min(fp, food_remaining);
+        } else if (t == 1) { // perishable
+            int give = std::min(fp, (int)(sw / w_p));
+            cur.p += give; sw -= give * w_p;
+            fp -= give; food_remaining -= give;
+            fd = std::min(fd, food_remaining);
+        } else { // other
+            int give = std::min(fo, (int)(sw / w_o));
+            cur.o += give; sw -= give * w_o;
+            fo -= give;
+        }
+    }
+
+    double val = cur.d * v_d + cur.p * v_p + cur.o * v_o;
+    if (val > best_value + 1e-12) {
+        best_value = val;
+        best = cur;
     }
 
     return best;
@@ -630,7 +694,7 @@ bool change_quantity(State& s, std::mt19937& rng) {
 
     return false;
 }
-void random_village_fill(State &s, std::mt19937 &rng) {
+void random_village_fill(State &s, std::mt19937 &rng,vector<int> order) {
     // 1. Collect villages with remaining demand
     std::vector<int> candidates;
     for (int v = 0; v < V; v++) {
@@ -664,7 +728,7 @@ void random_village_fill(State &s, std::mt19937 &rng) {
         // 3. Evaluate all helicopters greedily
         for (int h = 0; h < H; h++) {
             double spare_weight = helis[h].w_cap;
-            Delivery del = allocate_best_delivery(village_id, s, h, spare_weight);
+            Delivery del = allocate_best_delivery(village_id, s, h, spare_weight,order);
 
             if (del.d == 0 && del.p == 0 && del.o == 0) continue;
 
@@ -827,7 +891,7 @@ if (alloc.value <= 0) continue;
 // profitable NEW trip it can create for any helicopter to any village with
 // remaining demand, builds it, and repeats until no more profitable trips can be made.
 // CORRECTED VERSION
-void repair_fill_demand_new_trips(State &s, Pool &pool, std::mt19937 &rng) {
+void repair_fill_demand_new_trips(State &s, Pool &pool, std::mt19937 &rng,vector<int> order) {
     if (pool.removed.empty()) return;
 
     // 1. Aggregate all removed deliveries into a total demand per village.
@@ -854,7 +918,9 @@ void repair_fill_demand_new_trips(State &s, Pool &pool, std::mt19937 &rng) {
                 // --- FIX PART 1: ---
                 // Call the allocator WITHOUT limiting it to the pool's demand.
                 // Let it determine the TRUE need based on village limits and s.delivered.
-                Delivery potential_del = allocate_best_delivery(village_id, s, h, spare_weight);
+                
+
+                Delivery potential_del = allocate_best_delivery(village_id, s, h, spare_weight,order);
 
                 if (potential_del.d == 0 && potential_del.p == 0 && potential_del.o == 0) {
                     continue;
@@ -912,85 +978,156 @@ void repair_fill_demand_new_trips(State &s, Pool &pool, std::mt19937 &rng) {
     
     pool.removed.clear();
 }
-void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng) {
+void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng,vector<int> order) {
+    // Randomize order of removed items we try to reinsert
     shuffle(pool.removed.begin(), pool.removed.end(), rng);
     auto it = pool.removed.begin();
+
     while (it != pool.removed.end()) {
-        Delivery del{it->v, it->d, it->p, it->o};
-        // We still need del_weight for constraint checking
-        double del_weight = del.d * w_d + del.p * w_p + del.o * w_o;
+        const int village_id = it->v;
 
         double best_gain = -1e18;
         int best_h = -1, best_t = -1, best_pos = -1;
         double best_extra_dist = 0.0;
+        Delivery best_del{village_id, 0, 0, 0};
 
-        // --- FIX PART 1: Calculate true effective value for gain calculation ---
-        double effective_value = calculate_effective_value_change(s, del);
-
-        for (int h = 0; h < (int)s.helis.size(); h++) {
-            for (int t = 0; t < (int)s.helis[h].trips.size(); t++) {
+        // ---- Try inserting into existing trips (at every position) ----
+        for (int h = 0; h < (int)s.helis.size(); ++h) {
+            for (int t = 0; t < (int)s.helis[h].trips.size(); ++t) {
                 Trip &trip = s.helis[h].trips[t];
-                for (int pos = 0; pos <= (int)trip.stops.size(); pos++) {
-                    int prev_node = (pos == 0) ? helis[h].home_city - 1 : C + trip.stops[pos - 1].village - 1;
-                    int current_node = C + del.village - 1;
-                    int next_node = (pos == (int)trip.stops.size()) ? helis[h].home_city - 1 : C + trip.stops[pos].village - 1;
-                    
-                    double extra_dist = dist_matrix[prev_node][current_node] + dist_matrix[current_node][next_node] - dist_matrix[prev_node][next_node];
+
+                for (int pos = 0; pos <= (int)trip.stops.size(); ++pos) {
+                    const int prev_node = (pos == 0)
+                        ? helis[h].home_city - 1
+                        : C + trip.stops[pos - 1].village - 1;
+
+                    const int current_node = C + village_id - 1;
+
+                    const int next_node = (pos == (int)trip.stops.size())
+                        ? helis[h].home_city - 1
+                        : C + trip.stops[pos].village - 1;
+
+                    const double extra_dist =
+                        dist_matrix[prev_node][current_node] +
+                        dist_matrix[current_node][next_node] -
+                        dist_matrix[prev_node][next_node];
+
+                    // Distance feasibility checks
                     if (trip.distance + extra_dist > helis[h].dcap + 1e-9) continue;
                     if (s.helis[h].total_distance + extra_dist > DMax + 1e-9) continue;
+
+                    // Weight left on this trip
+                    const double spare_weight = helis[h].w_cap - trip.weight;
+                    if (spare_weight <= 1e-9) continue;
+
+                    // Allocate delivery according to demand/limits and spare weight
+                    Delivery del = allocate_best_delivery(village_id, s, h, spare_weight, order);
+                    if (del.d + del.p + del.o == 0) continue; // nothing to deliver here
+
+                    const double del_weight = del.d * w_d + del.p * w_p + del.o * w_o;
                     if (trip.weight + del_weight > helis[h].w_cap + 1e-9) continue;
 
-                    // Use the corrected 'effective_value' here
-                    double gain = effective_value - helis[h].alpha * extra_dist;
+                    // Use effective value change (your corrected objective contribution)
+                    const double effective_value = calculate_effective_value_change(s, del);
+                    const double gain = effective_value - helis[h].alpha * extra_dist;
+
                     if (gain > best_gain) {
-                        best_gain = gain; best_h = h; best_t = t; best_pos = pos; best_extra_dist = extra_dist;
+                        best_gain = gain;
+                        best_h = h; best_t = t; best_pos = pos;
+                        best_extra_dist = extra_dist;
+                        best_del = del;
                     }
                 }
             }
         }
 
         bool inserted = false;
-        if (best_gain > -1e17) {
-            Trip &trip = s.helis[best_h].trips[best_t];
-            trip.stops.insert(trip.stops.begin() + best_pos, del);
 
-            // Note: trip.value should be updated with the RAW value of packets,
-            // as it's just a cache for that trip. The global objective uses the true gain.
-            double raw_del_value = del.d * v_d + del.p * v_p + del.o * v_o;
+        if (best_gain > -1e17) {
+            // ---- Insert chosen delivery into the best existing trip/position ----
+            Trip &trip = s.helis[best_h].trips[best_t];
+            trip.stops.insert(trip.stops.begin() + best_pos, best_del);
+
+            const double raw_del_value =
+                best_del.d * v_d + best_del.p * v_p + best_del.o * v_o;
+            const double del_weight =
+                best_del.d * w_d + best_del.p * w_p + best_del.o * w_o;
+
             trip.distance += best_extra_dist;
-            trip.value += raw_del_value; 
+            trip.value += raw_del_value;   // raw value cache for the trip
             trip.weight += del_weight;
 
             s.helis[best_h].total_distance += best_extra_dist;
-            s.delivered[del.village - 1][0] += del.d; s.delivered[del.village - 1][1] += del.p; s.delivered[del.village - 1][2] += del.o;
-            s.objective += best_gain; // This now uses the CORRECT gain
+
+            // Update delivered tallies
+            s.delivered[best_del.village - 1][0] += best_del.d;
+            s.delivered[best_del.village - 1][1] += best_del.p;
+            s.delivered[best_del.village - 1][2] += best_del.o;
+
+            // Global objective uses the effective gain
+            s.objective += best_gain;
+
             inserted = true;
         } else {
-            double best_new_trip_gain = -1e18; int best_h_for_new_trip = -1;
-            for (int h = 0; h < (int)s.helis.size(); h++) {
-                double trip_dist = dist_matrix[helis[h].home_city-1][C+del.village-1] * 2;
-                if (trip_dist <= helis[h].dcap + 1e-9 && del_weight <= helis[h].w_cap + 1e-9 && s.helis[h].total_distance + trip_dist <= DMax + 1e-9) {
-                    
-                    // --- FIX PART 2: Use effective_value for new trip gain ---
-                    double new_trip_gain = effective_value - helis[h].alpha * trip_dist - helis[h].F;
-                    if (new_trip_gain > best_new_trip_gain) {
-                        best_new_trip_gain = new_trip_gain; best_h_for_new_trip = h;
-                    }
+            // ---- No good insert into existing trips: try a new trip ----
+            double best_new_trip_gain = -1e18;
+            int best_h_for_new_trip = -1;
+            Delivery best_new_trip_del{village_id, 0, 0, 0};
+
+            for (int h = 0; h < (int)s.helis.size(); ++h) {
+                const int home = helis[h].home_city - 1;
+                const int vill = C + village_id - 1;
+
+                const double round_trip_dist = dist_matrix[home][vill] * 2.0;
+                if (round_trip_dist > helis[h].dcap + 1e-9) continue;
+                if (s.helis[h].total_distance + round_trip_dist > DMax + 1e-9) continue;
+
+                // New trip spare weight equals heli capacity (trip is empty)
+                const double spare_weight = helis[h].w_cap;
+
+                Delivery del = allocate_best_delivery(village_id, s, h, spare_weight, order);
+                if (del.d + del.p + del.o == 0) continue;
+
+                const double del_weight =
+                    del.d * w_d + del.p * w_p + del.o * w_o;
+                if (del_weight > helis[h].w_cap + 1e-9) continue;
+
+                const double effective_value = calculate_effective_value_change(s, del);
+                const double gain = effective_value - helis[h].alpha * round_trip_dist - helis[h].F;
+
+                if (gain > best_new_trip_gain) {
+                    best_new_trip_gain = gain;
+                    best_h_for_new_trip = h;
+                    best_new_trip_del = del;
                 }
             }
+
             if (best_h_for_new_trip != -1) {
-                int h = best_h_for_new_trip;
-                Trip new_trip; new_trip.stops.push_back(del);
-                
-                double raw_del_value = del.d * v_d + del.p * v_p + del.o * v_o;
+                const int h = best_h_for_new_trip;
+                const int home = helis[h].home_city - 1;
+                const int vill = C + village_id - 1;
+
+                Trip new_trip;
+                new_trip.stops.push_back(best_new_trip_del);
+
+                const double raw_del_value =
+                    best_new_trip_del.d * v_d + best_new_trip_del.p * v_p + best_new_trip_del.o * v_o;
+                const double del_weight =
+                    best_new_trip_del.d * w_d + best_new_trip_del.p * w_p + best_new_trip_del.o * w_o;
+
                 new_trip.weight = del_weight;
                 new_trip.value = raw_del_value;
-                new_trip.distance = dist_matrix[helis[h].home_city-1][C+del.village-1] * 2;
-                
+                new_trip.distance = dist_matrix[home][vill] * 2.0;
+
                 s.helis[h].trips.push_back(new_trip);
                 s.helis[h].total_distance += new_trip.distance;
-                s.delivered[del.village-1][0] += del.d; s.delivered[del.village-1][1] += del.p; s.delivered[del.village-1][2] += del.o;
-                s.objective += best_new_trip_gain; // This now uses the CORRECT gain
+
+                s.delivered[best_new_trip_del.village - 1][0] += best_new_trip_del.d;
+                s.delivered[best_new_trip_del.village - 1][1] += best_new_trip_del.p;
+                s.delivered[best_new_trip_del.village - 1][2] += best_new_trip_del.o;
+
+                s.objective += best_new_trip_gain;
+
                 inserted = true;
             }
         }
@@ -1001,53 +1138,95 @@ void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng) {
             ++it;
         }
     }
-    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
+
+    // Cleanup: drop any empty trips that might remain
+    for (auto &h : s.helis) {
+        h.trips.erase(
+            remove_if(h.trips.begin(), h.trips.end(),
+                      [](const Trip &t) { return t.stops.empty(); }),
+            h.trips.end()
+        );
+    }
 }
-void repair_random_insert(State &s, Pool &pool, std::mt19937 &rng) {
+
+void repair_random_insert(State &s, Pool &pool, std::mt19937 &rng,vector<int> order) {
     shuffle(pool.removed.begin(), pool.removed.end(), rng);
     auto it = pool.removed.begin();
-    while(it != pool.removed.end()){
-        Delivery del{it->v, it->d, it->p, it->o};
-        // We still need the raw value and weight for trip caches and constraints
-        double raw_del_value = del.d*v_d + del.p*v_p + del.o*v_o;
-        double del_weight = del.d*w_d + del.p*w_p + del.o*w_o;
-        
-        struct FeasibleInsertion { int h,t,pos; double extra_dist; };
+
+    while (it != pool.removed.end()) {
+        const int village_id = it->v;
+
+        struct FeasibleInsertion { int h, t, pos; double extra_dist; Delivery del; };
         std::vector<FeasibleInsertion> feasible_spots;
 
-        for(int h=0; h<s.helis.size(); ++h) for(int t=0; t<s.helis[h].trips.size(); ++t) {
-            Trip& trip = s.helis[h].trips[t];
-            for(int pos=0; pos<=trip.stops.size(); ++pos) {
-                int prev_node = (pos == 0) ? helis[h].home_city - 1 : C + trip.stops[pos - 1].village - 1;
-                int current_node = C + del.village - 1;
-                int next_node = (pos == (int)trip.stops.size()) ? helis[h].home_city - 1 : C + trip.stops[pos].village - 1;
-                
-                double extra_dist = dist_matrix[prev_node][current_node] + dist_matrix[current_node][next_node] - dist_matrix[prev_node][next_node];
-                if (trip.distance+extra_dist > helis[h].dcap+1e-9 || s.helis[h].total_distance+extra_dist > DMax+1e-9 || trip.weight+del_weight > helis[h].w_cap+1e-9) continue;
-                feasible_spots.push_back({h,t,pos,extra_dist});
+        for (int h = 0; h < (int)s.helis.size(); ++h) {
+            for (int t = 0; t < (int)s.helis[h].trips.size(); ++t) {
+                Trip &trip = s.helis[h].trips[t];
+
+                for (int pos = 0; pos <= (int)trip.stops.size(); ++pos) {
+                    const int prev_node = (pos == 0)
+                        ? helis[h].home_city - 1
+                        : C + trip.stops[pos - 1].village - 1;
+
+                    const int curr_node = C + village_id - 1;
+
+                    const int next_node = (pos == (int)trip.stops.size())
+                        ? helis[h].home_city - 1
+                        : C + trip.stops[pos].village - 1;
+
+                    const double extra_dist =
+                        dist_matrix[prev_node][curr_node] +
+                        dist_matrix[curr_node][next_node] -
+                        dist_matrix[prev_node][next_node];
+
+                    // Distance feasibility
+                    if (trip.distance + extra_dist > helis[h].dcap + 1e-9) continue;
+                    if (s.helis[h].total_distance + extra_dist > DMax + 1e-9) continue;
+
+                    // Spare capacity
+                    const double spare_weight = helis[h].w_cap - trip.weight;
+                    if (spare_weight <= 1e-9) continue;
+
+                    // Allocate demand-driven delivery
+                    Delivery del = allocate_best_delivery(village_id, s, h, spare_weight, order);
+                    if (del.d + del.p + del.o == 0) continue;
+
+                    const double del_weight = del.d*w_d + del.p*w_p + del.o*w_o;
+                    if (trip.weight + del_weight > helis[h].w_cap + 1e-9) continue;
+
+                    feasible_spots.push_back({h, t, pos, extra_dist, del});
+                }
             }
         }
-        
+
         bool inserted = false;
         if (!feasible_spots.empty()) {
-            std::uniform_int_distribution<int> dist(0, feasible_spots.size()-1);
-            FeasibleInsertion spot = feasible_spots[dist(rng)];
-            
-            // --- FIX: Calculate the true effective value BEFORE updating the objective ---
-            double effective_value = calculate_effective_value_change(s, del);
+            std::uniform_int_distribution<int> pick(0, (int)feasible_spots.size()-1);
+            FeasibleInsertion spot = feasible_spots[pick(rng)];
 
-            // Now perform the insertion and update the state
-            Trip& trip = s.helis[spot.h].trips[spot.t];
-            trip.stops.insert(trip.stops.begin()+spot.pos, del);
+            // Effective contribution of this delivery
+            double effective_value = calculate_effective_value_change(s, spot.del);
+
+            // Raw weight/value for caches
+            double raw_del_value = spot.del.d*v_d + spot.del.p*v_p + spot.del.o*v_o;
+            double del_weight    = spot.del.d*w_d + spot.del.p*w_p + spot.del.o*w_o;
+
+            // Apply insertion
+            Trip &trip = s.helis[spot.h].trips[spot.t];
+            trip.stops.insert(trip.stops.begin() + spot.pos, spot.del);
             trip.distance += spot.extra_dist;
-            trip.value += raw_del_value; // Trip cache uses raw value
+            trip.value += raw_del_value;
             trip.weight += del_weight;
-            
+
             s.helis[spot.h].total_distance += spot.extra_dist;
-            s.delivered[del.village-1][0]+=del.d; s.delivered[del.village-1][1]+=del.p; s.delivered[del.village-1][2]+=del.o;
-            
-            // Use the corrected effective_value for the objective update
+
+            s.delivered[spot.del.village - 1][0] += spot.del.d;
+            s.delivered[spot.del.village - 1][1] += spot.del.p;
+            s.delivered[spot.del.village - 1][2] += spot.del.o;
+
+            // Update objective with demand-aware gain
             s.objective += effective_value - helis[spot.h].alpha * spot.extra_dist;
+
             inserted = true;
         }
 
@@ -1057,35 +1236,43 @@ void repair_random_insert(State &s, Pool &pool, std::mt19937 &rng) {
             ++it;
         }
     }
-    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
+
+    // Cleanup: remove empty trips
+    for (auto &h : s.helis) {
+        h.trips.erase(
+            remove_if(h.trips.begin(), h.trips.end(),
+                      [](const Trip &t){ return t.stops.empty(); }),
+            h.trips.end()
+        );
+    }
 }
-void repair_cluster_build(State &s, Pool &pool, std::mt19937 &rng) {
+void repair_cluster_build(State &s, Pool &pool, std::mt19937 &rng,vector<int> order) {
     std::vector<bool> used(pool.removed.size(), false);
     int remaining = pool.removed.size();
 
     while (remaining > 0) {
+        // ---- pick random seed delivery ----
         int seed_idx = -1;
         std::uniform_int_distribution<int> dist(0, remaining - 1);
         int skip = dist(rng);
-        for(int i = 0; i < pool.removed.size(); ++i) {
+        for (int i = 0; i < (int)pool.removed.size(); ++i) {
             if (!used[i]) {
-                if (skip == 0) {
-                    seed_idx = i;
-                    break;
-                }
+                if (skip == 0) { seed_idx = i; break; }
                 skip--;
             }
         }
         if (seed_idx == -1) break; 
-        
+
         used[seed_idx] = true;
         remaining--;
-        RemovedDelivery seed_del = pool.removed[seed_idx];
 
+        int seed_v = pool.removed[seed_idx].v;
+
+        // ---- choose nearest helicopter ----
         int best_h = -1;
         double min_dist_to_seed = 1e18;
         for (int h = 0; h < (int)s.helis.size(); ++h) {
-            double d = dist_matrix[helis[h].home_city - 1][C + seed_del.v - 1];
+            double d = dist_matrix[helis[h].home_city - 1][C + seed_v - 1];
             if (d < min_dist_to_seed) {
                 min_dist_to_seed = d;
                 best_h = h;
@@ -1093,16 +1280,25 @@ void repair_cluster_build(State &s, Pool &pool, std::mt19937 &rng) {
         }
         if (best_h == -1) continue;
 
-        Trip new_trip;
-        new_trip.stops.push_back({seed_del.v, seed_del.d, seed_del.p, seed_del.o});
-        
-        new_trip.weight = seed_del.d * w_d + seed_del.p * w_p + seed_del.o * w_o;
-        new_trip.value = seed_del.d * v_d + seed_del.p * v_p + seed_del.o * v_o;
-        new_trip.distance = dist_matrix[helis[best_h].home_city-1][C+seed_del.v-1] * 2;
+        // ---- allocate demand-aware seed delivery ----
+        double spare_weight = helis[best_h].w_cap;
+        Delivery seed_del = allocate_best_delivery(seed_v, s, best_h, spare_weight, {0,1,2});
+        if (seed_del.d + seed_del.p + seed_del.o == 0) continue;
 
+        Trip new_trip;
+        new_trip.stops.push_back(seed_del);
+
+        double raw_value = seed_del.d*v_d + seed_del.p*v_p + seed_del.o*v_o;
+        double raw_weight = seed_del.d*w_d + seed_del.p*w_p + seed_del.o*w_o;
+
+        new_trip.weight   = raw_weight;
+        new_trip.value    = raw_value;
+        new_trip.distance = dist_matrix[helis[best_h].home_city-1][C+seed_v-1] * 2;
+
+        // ---- greedy clustering loop ----
         while (remaining > 0) {
             int last_village_idx = new_trip.stops.back().village - 1;
-            int best_next_del_idx = -1;
+            int best_next_idx = -1;
             double min_next_dist = 1e18;
 
             for (int i = 0; i < (int)pool.removed.size(); ++i) {
@@ -1110,194 +1306,251 @@ void repair_cluster_build(State &s, Pool &pool, std::mt19937 &rng) {
                     double d = dist_matrix[C + last_village_idx][C + pool.removed[i].v - 1];
                     if (d < min_next_dist) {
                         min_next_dist = d;
-                        best_next_del_idx = i;
+                        best_next_idx = i;
                     }
                 }
             }
+            if (best_next_idx == -1) break;
 
-            if (best_next_del_idx == -1) break;
+            int next_v = pool.removed[best_next_idx].v;
 
-            RemovedDelivery next_del = pool.removed[best_next_del_idx];
-            double next_del_weight = next_del.d * w_d + next_del.p * w_p + next_del.o * w_o;
-            
+            double spare = helis[best_h].w_cap - new_trip.weight;
+            if (spare <= 1e-9) break;
+
+            Delivery next_del = allocate_best_delivery(next_v, s, best_h, spare, order);
+            if (next_del.d + next_del.p + next_del.o == 0) {
+                used[best_next_idx] = true;
+                remaining--;
+                continue;
+            }
+
+            double del_weight = next_del.d*w_d + next_del.p*w_p + next_del.o*w_o;
+
             int last_node = C + last_village_idx;
-            int next_node = C + next_del.v - 1;
+            int next_node = C + next_del.village - 1;
             int home_node = helis[best_h].home_city - 1;
+
             double extra_dist = dist_matrix[last_node][next_node] + dist_matrix[next_node][home_node] - dist_matrix[last_node][home_node];
+            double proposed_weight = new_trip.weight + del_weight;
+            double proposed_dist   = new_trip.distance + extra_dist;
 
-            double proposed_weight = new_trip.weight + next_del_weight;
-            double proposed_dist = new_trip.distance + extra_dist;
-
-            if (proposed_dist <= helis[best_h].dcap + 1e-9 && proposed_weight <= helis[best_h].w_cap + 1e-9 && s.helis[best_h].total_distance + proposed_dist <= DMax + 1e-9) {
-                new_trip.stops.push_back({next_del.v, next_del.d, next_del.p, next_del.o});
+            if (proposed_dist <= helis[best_h].dcap + 1e-9 &&
+                proposed_weight <= helis[best_h].w_cap + 1e-9 &&
+                s.helis[best_h].total_distance + proposed_dist <= DMax + 1e-9) 
+            {
+                new_trip.stops.push_back(next_del);
                 new_trip.weight = proposed_weight;
                 new_trip.distance = proposed_dist;
-                new_trip.value += next_del.d * v_d + next_del.p * v_p + next_del.o * v_o;
-                
-                used[best_next_del_idx] = true;
+                new_trip.value += next_del.d*v_d + next_del.p*v_p + next_del.o*v_o;
+
+                used[best_next_idx] = true;
                 remaining--;
             } else {
                 break;
             }
         }
-        
+
+        // ---- commit trip ----
         if (!new_trip.stops.empty()) {
             s.helis[best_h].trips.push_back(new_trip);
             s.helis[best_h].total_distance += new_trip.distance;
-            double new_trip_gain = new_trip.value - helis[best_h].alpha * new_trip.distance - helis[best_h].F;
-            s.objective += new_trip_gain;
-            for (const auto& del : new_trip.stops) {
-                s.delivered[del.village - 1][0] += del.d;
-                s.delivered[del.village - 1][1] += del.p;
-                s.delivered[del.village - 1][2] += del.o;
+
+            double effective_trip_value = 0.0;
+            for (const auto &del : new_trip.stops) {
+                effective_trip_value += calculate_effective_value_change(s, del);
+                s.delivered[del.village-1][0] += del.d;
+                s.delivered[del.village-1][1] += del.p;
+                s.delivered[del.village-1][2] += del.o;
             }
+
+            s.objective += effective_trip_value - helis[best_h].alpha * new_trip.distance - helis[best_h].F;
         }
     }
-    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
+
+    // ---- cleanup ----
+    for (auto &h : s.helis) {
+        h.trips.erase(
+            remove_if(h.trips.begin(), h.trips.end(), [](const Trip &t){ return t.stops.empty(); }),
+            h.trips.end()
+        );
+    }
 }
 
-
-void repair_and_adjust_quantities(State &s, Pool &pool, std::mt19937 &rng) {
-    // Shuffle the pool to process requests in a random order, introducing diversity
+void repair_and_adjust_quantities(State &s, Pool &pool, std::mt19937 &rng, std::vector<int> order) {
+    // Shuffle pool to introduce randomness
     shuffle(pool.removed.begin(), pool.removed.end(), rng);
 
     auto it = pool.removed.begin();
     while (it != pool.removed.end()) {
-        RemovedDelivery request = *it;
+        RemovedDelivery &request = *it;
+        const int village_id = request.v;
 
-        // --- STAGE 1: SEARCH FOR THE BEST POSSIBLE ACTION ---
+        // --- STAGE 1: SEARCH FOR BEST ACTION ---
         double best_gain = -1e18;
         bool is_action_found = false;
         bool is_new_trip_action = false;
-        
-        // Variables to store the details of the best action
+
         int best_h = -1, best_t = -1, best_pos = -1;
-        Delivery best_adjusted_del;
+        Delivery best_adjusted_del{village_id, 0, 0, 0};
         double best_action_dist_change = 0.0;
 
-        // --- Part A: Try to insert into an EXISTING trip ---
+        // Part A: try inserting into existing trips
         for (int h = 0; h < (int)s.helis.size(); ++h) {
             for (int t = 0; t < (int)s.helis[h].trips.size(); ++t) {
-                Trip& trip = s.helis[h].trips[t];
-                
-                // Don't insert into trips that are already empty (let the "new trip" logic handle that)
-                if (trip.stops.empty()) continue;
+                Trip &trip = s.helis[h].trips[t];
 
+                // allow insertion into any trip (skip truly empty trips if you prefer)
                 for (int pos = 0; pos <= (int)trip.stops.size(); ++pos) {
-                    // Calculate spare capacity of this trip
-                    double spare_weight = helis[h].w_cap - trip.weight;
-                    
-                    // Create an optimized delivery based on spare capacity and request needs
-                    Delivery adjusted_del = {request.v, 0, 0, 0};
-                    int p_to_add = std::min(request.p, (int)(spare_weight / w_p));
-                    adjusted_del.p = p_to_add;
-                    spare_weight -= p_to_add * w_p;
-                    int o_to_add = std::min(request.o, (int)(spare_weight / w_o));
-                    adjusted_del.o = o_to_add;
-
-                    if (adjusted_del.p == 0 && adjusted_del.o == 0) continue; // Cannot fit anything
-
-                    double adjusted_weight = adjusted_del.p * w_p + adjusted_del.o * w_o;
-                    double adjusted_value = adjusted_del.p * v_p + adjusted_del.o * v_o;
-                    
-                    // Calculate the distance change for this new, adjusted delivery
-                    int prev_node = (pos == 0) ? helis[h].home_city - 1 : C + trip.stops[pos-1].village - 1;
-                    int current_node = C + adjusted_del.village - 1;
-                    int next_node = (pos == trip.stops.size()) ? helis[h].home_city - 1 : C + trip.stops[pos].village - 1;
+                    // distance delta for inserting at pos
+                    int prev_node = (pos == 0) ? helis[h].home_city - 1 : C + trip.stops[pos - 1].village - 1;
+                    int current_node = C + village_id - 1;
+                    int next_node = (pos == (int)trip.stops.size()) ? helis[h].home_city - 1 : C + trip.stops[pos].village - 1;
                     double extra_dist = dist_matrix[prev_node][current_node] + dist_matrix[current_node][next_node] - dist_matrix[prev_node][next_node];
 
-                    // Final feasibility check
-                    if (trip.distance + extra_dist <= helis[h].dcap + 1e-9 &&
-                        s.helis[h].total_distance + extra_dist <= DMax + 1e-9) {
-                        
-                        double gain = adjusted_value - helis[h].alpha * extra_dist;
-                        if (gain > best_gain) {
-                            best_gain = gain;
-                            is_action_found = true;
-                            is_new_trip_action = false;
-                            best_h = h; best_t = t; best_pos = pos;
-                            best_adjusted_del = adjusted_del;
-                            best_action_dist_change = extra_dist;
-                        }
+                    // feasibility checks for distances
+                    if (trip.distance + extra_dist > helis[h].dcap + 1e-9) continue;
+                    if (s.helis[h].total_distance + extra_dist > DMax + 1e-9) continue;
+
+                    // spare weight on this trip
+                    double spare_weight = helis[h].w_cap - trip.weight;
+                    if (spare_weight <= 1e-9) continue;
+
+                    // Use allocate_best_delivery to compute the best delivery given spare weight
+                    // and also cap by request remaining quantities (max_d, max_p, max_o)
+                    Delivery adjusted_del = allocate_best_delivery(village_id, s, h, spare_weight, order,
+                                                                   std::min(request.d, INT_MAX),
+                                                                   std::min(request.p, INT_MAX),
+                                                                   std::min(request.o, INT_MAX));
+                    if (adjusted_del.d + adjusted_del.p + adjusted_del.o == 0) continue;
+
+                    // final weight check
+                    double del_weight = adjusted_del.d * w_d + adjusted_del.p * w_p + adjusted_del.o * w_o;
+                    if (trip.weight + del_weight > helis[h].w_cap + 1e-9) continue;
+
+                    // compute effective value change (correct contribution to objective)
+                    double effective_value = calculate_effective_value_change(s, adjusted_del);
+                    double gain = effective_value - helis[h].alpha * extra_dist;
+
+                    if (gain > best_gain) {
+                        best_gain = gain;
+                        is_action_found = true;
+                        is_new_trip_action = false;
+                        best_h = h; best_t = t; best_pos = pos;
+                        best_adjusted_del = adjusted_del;
+                        best_action_dist_change = extra_dist;
                     }
                 }
             }
         }
 
-        // --- Part B: Try to create a NEW trip ---
+        // Part B: try creating a new trip (full spare weight available)
         for (int h = 0; h < (int)s.helis.size(); ++h) {
-            double spare_weight = helis[h].w_cap; // A new trip has full weight capacity
-            
-            Delivery adjusted_del = {request.v, 0, 0, 0};
-            int p_to_add = std::min(request.p, (int)(spare_weight / w_p));
-            adjusted_del.p = p_to_add;
-            spare_weight -= p_to_add * w_p;
-            int o_to_add = std::min(request.o, (int)(spare_weight / w_o));
-            adjusted_del.o = o_to_add;
+            double spare_weight = helis[h].w_cap;
+            Delivery adjusted_del = allocate_best_delivery(village_id, s, h, spare_weight, order,
+                                                           std::min(request.d, INT_MAX),
+                                                           std::min(request.p, INT_MAX),
+                                                           std::min(request.o, INT_MAX));
+            if (adjusted_del.d + adjusted_del.p + adjusted_del.o == 0) continue;
 
-            if (adjusted_del.p == 0 && adjusted_del.o == 0) continue;
+            double del_weight = adjusted_del.d * w_d + adjusted_del.p * w_p + adjusted_del.o * w_o;
+            if (del_weight > helis[h].w_cap + 1e-9) continue;
 
-            double adjusted_weight = adjusted_del.p * w_p + adjusted_del.o * w_o;
-            double adjusted_value = adjusted_del.p * v_p + adjusted_del.o * v_o;
-            double trip_dist = dist_matrix[helis[h].home_city-1][C+adjusted_del.village-1] * 2;
+            double raw_value = adjusted_del.d * v_d + adjusted_del.p * v_p + adjusted_del.o * v_o;
+            double round_trip_dist = dist_matrix[helis[h].home_city - 1][C + village_id - 1] * 2.0;
 
-            if (trip_dist <= helis[h].dcap + 1e-9 && s.helis[h].total_distance + trip_dist <= DMax + 1e-9) {
-                double gain = adjusted_value - helis[h].alpha * trip_dist - helis[h].F;
-                if (gain > best_gain) {
-                    best_gain = gain;
-                    is_action_found = true;
-                    is_new_trip_action = true;
-                    best_h = h;
-                    best_adjusted_del = adjusted_del;
-                    best_action_dist_change = trip_dist;
-                }
+            if (round_trip_dist > helis[h].dcap + 1e-9) continue;
+            if (s.helis[h].total_distance + round_trip_dist > DMax + 1e-9) continue;
+
+            double effective_value = calculate_effective_value_change(s, adjusted_del);
+            double gain = effective_value - helis[h].alpha * round_trip_dist - helis[h].F;
+
+            if (gain > best_gain) {
+                best_gain = gain;
+                is_action_found = true;
+                is_new_trip_action = true;
+                best_h = h;
+                best_adjusted_del = adjusted_del;
+                best_action_dist_change = round_trip_dist;
             }
         }
-        
-        // --- STAGE 2: EXECUTE THE BEST ACTION ---
+
+        // --- STAGE 2: EXECUTE BEST ACTION (if any) ---
         if (is_action_found) {
             if (is_new_trip_action) {
+                // Create new trip and insert
                 Trip new_trip;
                 new_trip.stops.push_back(best_adjusted_del);
-                new_trip.weight = best_adjusted_del.p * w_p + best_adjusted_del.o * w_o;
-                new_trip.value = best_adjusted_del.p * v_p + best_adjusted_del.o * v_o;
-                new_trip.distance = best_action_dist_change;
-                s.helis[best_h].trips.push_back(new_trip);
-            } else { // Insert into existing trip
-                Trip& trip = s.helis[best_h].trips[best_t];
-                trip.stops.insert(trip.stops.begin() + best_pos, best_adjusted_del);
-                trip.distance += best_action_dist_change;
-                trip.value += best_adjusted_del.p * v_p + best_adjusted_del.o * v_o;
-                trip.weight += best_adjusted_del.p * w_p + best_adjusted_del.o * w_o;
-            }
-            
-            // Universal state updates
-            s.helis[best_h].total_distance += best_action_dist_change;
-            s.delivered[request.v-1][1] += best_adjusted_del.p;
-            s.delivered[request.v-1][2] += best_adjusted_del.o;
-            s.objective += best_gain;
 
-            // --- STAGE 3: UPDATE THE POOL ---
+                double raw_value = best_adjusted_del.d * v_d + best_adjusted_del.p * v_p + best_adjusted_del.o * v_o;
+                double del_weight = best_adjusted_del.d * w_d + best_adjusted_del.p * w_p + best_adjusted_del.o * w_o;
+
+                new_trip.weight = del_weight;
+                new_trip.value = raw_value;
+                new_trip.distance = best_action_dist_change;
+
+                s.helis[best_h].trips.push_back(new_trip);
+                s.helis[best_h].total_distance += best_action_dist_change;
+
+                // Update delivered tallies
+                s.delivered[best_adjusted_del.village - 1][0] += best_adjusted_del.d;
+                s.delivered[best_adjusted_del.village - 1][1] += best_adjusted_del.p;
+                s.delivered[best_adjusted_del.village - 1][2] += best_adjusted_del.o;
+
+                // Objective: best_gain already includes -alpha*dist -F for new trip
+                s.objective += best_gain;
+            } else {
+                // Insert into existing trip
+                Trip &trip = s.helis[best_h].trips[best_t];
+                trip.stops.insert(trip.stops.begin() + best_pos, best_adjusted_del);
+
+                double raw_value = best_adjusted_del.d * v_d + best_adjusted_del.p * v_p + best_adjusted_del.o * v_o;
+                double del_weight = best_adjusted_del.d * w_d + best_adjusted_del.p * w_p + best_adjusted_del.o * w_o;
+
+                trip.distance += best_action_dist_change;
+                trip.value += raw_value;
+                trip.weight += del_weight;
+
+                s.helis[best_h].total_distance += best_action_dist_change;
+
+                // Update delivered tallies
+                s.delivered[best_adjusted_del.village - 1][0] += best_adjusted_del.d;
+                s.delivered[best_adjusted_del.village - 1][1] += best_adjusted_del.p;
+                s.delivered[best_adjusted_del.village - 1][2] += best_adjusted_del.o;
+
+                // Objective: best_gain already equals effective_value - alpha*extra_dist
+                s.objective += best_gain;
+            }
+
+            // --- STAGE 3: UPDATE POOL ENTRY (subtract delivered quantities) ---
+            it->d -= best_adjusted_del.d;
             it->p -= best_adjusted_del.p;
             it->o -= best_adjusted_del.o;
-            if (it->p <= 0 && it->o <= 0) {
-                it = pool.removed.erase(it); // Request is fully satisfied
+
+            // Clamp to zero to avoid negative values due to rounding issues
+            if (it->d < 0) it->d = 0;
+            if (it->p < 0) it->p = 0;
+            if (it->o < 0) it->o = 0;
+
+            if (it->d == 0 && it->p == 0 && it->o == 0) {
+                it = pool.removed.erase(it);
             } else {
-                ++it; // Request partially satisfied, leave remainder for next iteration
+                ++it;
             }
         } else {
-            ++it; // No feasible action found for this request, skip it
+            // No feasible action found for this request (skip)
+            ++it;
         }
     }
-    for (auto& h : s.helis) { h.trips.erase(remove_if(h.trips.begin(), h.trips.end(), [](const Trip& t){ return t.stops.empty(); }), h.trips.end()); }
+
+    // Cleanup empty trips
+    for (auto &h : s.helis) {
+        h.trips.erase(
+            remove_if(h.trips.begin(), h.trips.end(), [](const Trip &t) { return t.stops.empty(); }),
+            h.trips.end()
+        );
+    }
 }
 
-// ===================================================================
-// FULL OBJECTIVE FUNCTION (FOR VALIDATION & INITIALIZATION)
-// ===================================================================
-
-
-//IT DOESNT CHECK IF THE HELICOPTER START AND END FROM THE HOME CITY
 double obj_func(State& state) {
     double total_value = 0.0;
     double total_cost = 0.0;
@@ -1367,26 +1620,28 @@ double obj_func(State& state) {
 // INITIAL STATE GENERATION
 // ===================================================================
 
-State generate_initial_state() {
+State generate_initial_state(const std::vector<int> &order) {
     State state;
     state.helis.resize(H);
     state.delivered.assign(V, {0,0,0});
     for(int h=0; h<H; ++h) state.helis[h].trips.push_back(Trip());
-
+    // cout<<"HI1"<<endl;
     std::vector<int> village_indices(V);
     std::iota(village_indices.begin(), village_indices.end(), 0);
-    
+    // cout<<"HI2"<<endl;
     for(int v_idx : village_indices) {
+        // cout<<"HI4";
         int people = villages[v_idx].n;
         int food_needed = people * 9;
         int other_needed = people * 1;
-        
+
       // Compute how much spare weight this helicopter has
-double spare_weight = helis[0].w_cap;  
+double spare_weight = helis[0].w_cap; 
 
+// cout<<"HI3";
 // Use the new allocator to decide d, p, o
-Delivery del = allocate_best_delivery(v_idx + 1, state, 0, spare_weight);
-
+Delivery del = allocate_best_delivery(v_idx + 1, state, 0, spare_weight,order);
+// cout<<"HI2";
 // Skip if nothing can be delivered
 if (del.d + del.p + del.o == 0) continue;
 
@@ -1545,7 +1800,7 @@ void calculate_full_objective(State &s) {
 // MAIN ALNS LOOP
 // ===================================================================
 
-State run_alns(State initial, ALNSData &alns){
+State run_alns(State initial, ALNSData &alns,vector<int> order){
     // obj_func(initial); // Calculate initial objective
     State current = initial;
     State best = initial;
@@ -1561,8 +1816,10 @@ State run_alns(State initial, ALNSData &alns){
 
     int max_iter = 200000;
     for(int iter = 0; iter < max_iter; ++iter) {
-        int d_idx = adaptive_picking(alns.weightD, alns.rng);
-        int r_idx = adaptive_picking(alns.weightR, alns.rng);
+        // int d_idx = adaptive_picking(alns.weightD, alns.rng);
+        // int r_idx = adaptive_picking(alns.weightR, alns.rng);
+        int d_idx = std::uniform_int_distribution<int>(0,alns.weightD.size()-1)(alns.rng);
+        int r_idx = std::uniform_int_distribution<int>(0,alns.weightR.size()-1)(alns.rng);
         alns.usesD[d_idx]++;
         alns.usesR[r_idx]++;
 
@@ -1589,38 +1846,49 @@ State run_alns(State initial, ALNSData &alns){
         //   repair_random_insert(temp, pool, alns.rng); 
         // repair_greedy_insert(temp, pool, alns.rng);
         //    cout<<alns.repair_names[r_idx]<<endl;
-
+        int index = adaptive_picking(weight_of_permu,alns.rng); 
+                
+                auto choice = alns.repair_names[r_idx];
+        int r = std::uniform_int_distribution<int>(0, 5)(alns.rng);
+        auto new_order = arr[r];
         switch(alns.repair_names[r_idx]) {
-            case greedy_insert: repair_greedy_insert(temp, pool, alns.rng); break;
+            case greedy_insert: repair_greedy_insert(temp, pool, alns.rng,new_order); break;
             // case regret2_insert: repair_regret2_insert(temp, pool, alns.rng); break;
-            case cluster_build: repair_cluster_build(temp, pool, alns.rng); break;
-            case random_insert: repair_random_insert(temp, pool, alns.rng); break;
-            case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng); break;
-            case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng); break;
+            case cluster_build: repair_cluster_build(temp, pool, alns.rng,new_order); break;
+            case random_insert: repair_random_insert(temp, pool, alns.rng,new_order); break;
+            case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng,new_order); break;
+            case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng,new_order); break;
         }
         // print_state(temp);
-                random_village_fill(temp,alns.rng);
+                change_quantity(current, alns.rng); 
+
+                random_village_fill(temp,alns.rng,new_order);
+                
         
                 double true_score = obj_func(temp); 
                 if(true_score == -1e18){continue;}
-                    double incremental_score = temp.objective;
+            
 
-        //    if (std::abs(incremental_score - true_score) > 0.01) { // Use a small tolerance
-        //     std::cout << "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
-        //     std::cout << ">>> INCONSISTENCY DETECTED in iteration " << iter << "\n";
-        //     std::cout << "    Used Destroy: " << alns.destroy_names[d_idx] 
-        //               << " | Used Repair: " << alns.repair_names[r_idx] << "\n";
-        //     std::cout << "--------------------------------------------------------\n";
-        //     std::cout << "  - Score after incremental updates: " << incremental_score << "\n";
-        //     std::cout << "  - True score from obj_func():      " << true_score << "\n";
-        //     std::cout << "  - DIFFERENCE:                      " << (incremental_score - true_score) << "\n";
-        //     std::cout << "\n>>> THIS MEANS A DESTROY OR REPAIR FUNCTION HAS A BUG <<<\n";
-        //     std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n";
-        //     // Optional: Pause the program here to inspect the state
-        // }
+     
         double delta = temp.objective - current.objective;
         bool accept = (delta >= 0) || (std::uniform_real_distribution<double>(0,1)(alns.rng) < exp(delta / alns.T));
+        
 
+            if ((iter + 1) % alns.update_window == 0){
+             if(accept){
+                if (temp.objective > best.objective) {
+                weight_of_permu[index] +=alns.r_best;
+                
+            } else if(temp.objective > current.objective){
+                weight_of_permu[index]+= alns.r_good;
+                // alns.scoreR[r_idx] += alns.r_good;
+            }
+            else{
+                   weight_of_permu[index] += alns.r_accepted;
+                // alns.scoreR[r_idx] += alns.r_accepted;
+            }
+             }   }
+            
         if (accept) {
             if (temp.objective > best.objective) {
                 best = temp;
@@ -1636,7 +1904,6 @@ State run_alns(State initial, ALNSData &alns){
             }
                             current = temp;
             //      if (std::uniform_real_distribution<>(0, 1)(alns.rng) < 0.90) {
-            //     // change_quantity(current, alns.rng); 
             //     // swap_packet_type(current,alns.rng);
             //     // We don't need to check the return value; if it makes a change, 
             //     // the 'current' state is now even better.
@@ -1660,67 +1927,85 @@ State run_alns(State initial, ALNSData &alns){
     return best;
 }
 
-
 void read_input_from_file(const std::string& filename) {
-    // Create an input file stream object to read from the specified file
     std::ifstream inputFile(filename);
 
-    // Check if the file was opened successfully. If not, print an error and exit.
     if (!inputFile.is_open()) {
         std::cerr << "Error: Could not open the file '" << filename << "'." << std::endl;
-        exit(1); // Exit the program with an error code
+        exit(1);
     }
 
-    // Now, simply use 'inputFile' exactly as you were using 'std::cin'
     double time_limit;
-    inputFile >> time_limit; // First line is time, but we don't use it here
+    inputFile >> time_limit;
+    // std::cout << "DEBUG: time_limit = " << time_limit << std::endl;
 
     inputFile >> DMax;
+    // std::cout << "DEBUG: DMax = " << DMax << std::endl;
+
     inputFile >> w_d >> v_d >> w_p >> v_p >> w_o >> v_o;
+    std::cout << "DEBUG: weights/values = "
+              << "w_d=" << w_d << " v_d=" << v_d
+              << " w_p=" << w_p << " v_p=" << v_p
+              << " w_o=" << w_o << " v_o=" << v_o << std::endl;
 
     inputFile >> C;
+    std::cout << "DEBUG: C (cities) = " << C << std::endl;
     cities.resize(C);
     for (int i = 0; i < C; ++i) {
         inputFile >> cities[i].first >> cities[i].second;
     }
+    std::cout << "DEBUG: Read " << cities.size() << " cities" << std::endl;
 
     inputFile >> V;
+    std::cout << "DEBUG: V (villages) = " << V << std::endl;
     villages.resize(V);
     for (int i = 0; i < V; ++i) {
         inputFile >> villages[i].x >> villages[i].y >> villages[i].n;
+        if (i < 5) { // just show first few for sanity
+            std::cout << "  DEBUG: village[" << i << "] = ("
+                      << villages[i].x << ", "
+                      << villages[i].y << ", "
+                      << villages[i].n << ")" << std::endl;
+        }
     }
+    std::cout << "DEBUG: Read " << villages.size() << " villages" << std::endl;
 
     inputFile >> H;
+    std::cout << "DEBUG: H (helicopters) = " << H << std::endl;
     helis.resize(H);
     for (int i = 0; i < H; ++i) {
-        inputFile >> helis[i].home_city >> helis[i].w_cap >> helis[i].dcap >> helis[i].F >> helis[i].alpha;
+        inputFile >> helis[i].home_city >> helis[i].w_cap
+                  >> helis[i].dcap >> helis[i].F >> helis[i].alpha;
+        std::cout << "  DEBUG: heli[" << i << "] = (home=" << helis[i].home_city
+                  << ", w_cap=" << helis[i].w_cap
+                  << ", dcap=" << helis[i].dcap
+                  << ", F=" << helis[i].F
+                  << ", alpha=" << helis[i].alpha << ")" << std::endl;
     }
 
-    // The file is automatically closed when 'inputFile' goes out of scope.
-    std::cout << "Successfully read all data from '" << filename << "'." << std::endl;
+    // std::cout << "Successfully read all data from '" << filename << "'." << std::endl;
 }
+
 // ===================================================================
 // MAIN FUNCTION
 // ===================================================================
 
-int main(){
+int main() {
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(NULL);
-    read_input_from_file("input2.txt");
- precompute_distances();
-        State initial_state = generate_initial_state();
-    print_state(initial_state);
-    
-    // // pool = destroy_random_stop(initial_state, num_to_remove, alns.rng);
+
+    // std::cout << "DEBUG: Starting program" << std::endl;
+
+    read_input_from_file("input6.txt");
+    // std::cout << "DEBUG: Finished reading input" << std::endl;
+
+    precompute_distances();
+    // std::cout << "DEBUG: Finished precomputing distances" << std::endl;
 
     ALNSData alns;
-    alns.rng.seed(0); 
-
+    alns.rng.seed(0);
     alns.destroy_names = { random_stop, route_remove, shaw, worst_values_destroyed, perishable_punished };
-    // alns.destroy_names = {random_stop };
-    // alns.repair_names = { greedy_insert };
-
-    alns.repair_names = { greedy_insert, cluster_build, random_insert, new_insert,repair_demand };
+    alns.repair_names = { greedy_insert, cluster_build, random_insert, new_insert, repair_demand };
 
     alns.weightD.assign(alns.destroy_names.size(), 1.0);
     alns.scoreD.assign(alns.destroy_names.size(), 0.0);
@@ -1730,10 +2015,41 @@ int main(){
     alns.scoreR.assign(alns.repair_names.size(), 0.0);
     alns.usesR.assign(alns.repair_names.size(), 0.0);
 
-    State best_solution = run_alns(initial_state, alns);
-    print_state(best_solution);
-    cout<<(best_solution.objective);
-    
+    std::vector<std::vector<int>> perms = {
+        {0,1,2}, {0,2,1},
+        {1,0,2}, {1,2,0},
+        {2,0,1}, {2,1,0}
+    };
 
+    // std::cout << "DEBUG: About to generate initial state" << std::endl;
+    State init0 = generate_initial_state(perms[0]);
+    // std::cout << "DEBUG: Initial state generated" << std::endl;
+
+    // std::cout << "DEBUG: About to run first ALNS" << std::endl;
+    State best_overall = run_alns(init0, alns, perms[0]);
+    // std::cout << "DEBUG: Finished first run_alns" << std::endl;
+
+    for (size_t i = 1; i < perms.size(); i++) {
+        // std::cout << "DEBUG: Starting permutation " << i << std::endl;
+        State init = generate_initial_state(perms[i]);
+        // std::cout << "DEBUG: Initial state for perm " << i << " generated" << std::endl;
+
+        State sol = run_alns(init, alns, perms[i]);
+        // std::cout << "DEBUG: Finished run_alns for perm " << i << std::endl;
+
+        // std::cout << "Objective for perm " << i << " = " << sol.objective << std::endl;
+
+        if (sol.objective > best_overall.objective) {
+            // std::cout << "DEBUG: New best objective found" << std::endl;
+            best_overall = sol;
+        }
+    }
+
+    // std::cout << "DEBUG: Finished all permutations" << std::endl;
+    print_state(best_overall);
+    
+    std::cout << "Best overall objective = " << best_overall.objective << std::endl;
+
+    // std::cout << "DEBUG: Program finished cleanly" << std::endl;
     return 0;
 }

@@ -308,10 +308,6 @@ void remove_stop_from_trip(State& s, Pool& pool, const Stop_tracking& ref) {
     }
 }
 #include <climits>
-
-// Greedy allocator that picks packet types by value-per-weight density,
-// respects village limits, current delivered counts, helicopter spare weight,
-// and (optionally) per-type availability limits (max_d/max_p/max_o).
 Delivery allocate_best_delivery(int village_id, State &s, int heli_id,
                                      double spare_weight,
                                      int max_d = INT_MAX, int max_p = INT_MAX, int max_o = INT_MAX) {
@@ -374,6 +370,66 @@ Delivery allocate_best_delivery(int village_id, State &s, int heli_id,
             best_value = val;
             best = cur;
         }
+    }
+
+    return best;
+}
+
+// Greedy allocator that picks packet types by value-per-weight density,
+// respects village limits, current delivered counts, helicopter spare weight,
+// and (optionally) per-type availability limits (max_d/max_p/max_o).
+Delivery allocate_best_delivery(int village_id, State &s, int heli_id,
+                                double spare_weight,
+                                const std::vector<int> &order,
+                                int max_d = INT_MAX, int max_p = INT_MAX, int max_o = INT_MAX) {
+    int v_idx = village_id - 1;
+    int people = villages[v_idx].n;
+
+    int food_limit = 9 * people;
+    int other_limit = people;
+
+    int already_d = s.delivered[v_idx][0];
+    int already_p = s.delivered[v_idx][1];
+    int already_o = s.delivered[v_idx][2];
+
+    int food_remaining = std::max(0, food_limit - (already_d + already_p));
+    int other_remaining = std::max(0, other_limit - already_o);
+
+    Delivery best = {village_id, 0, 0, 0};
+    double best_value = -1;
+
+    if (spare_weight + 1e-12 < std::min({w_d, w_p, w_o})) return best;
+    if (food_remaining <= 0 && other_remaining <= 0) return best;
+
+    double sw = spare_weight;
+    int fd = std::min(food_remaining, max_d);
+    int fp = std::min(food_remaining, max_p);
+    int fo = std::min(other_remaining, max_o);
+
+    Delivery cur = {village_id, 0, 0, 0};
+
+    for (int t : order) {
+        if (t == 0) { // dry
+            int give = std::min(fd, (int)(sw / w_d));
+            cur.d += give; sw -= give * w_d;
+            fd -= give; food_remaining -= give;
+            fp = std::min(fp, food_remaining);
+        } else if (t == 1) { // perishable
+            int give = std::min(fp, (int)(sw / w_p));
+            cur.p += give; sw -= give * w_p;
+            fp -= give; food_remaining -= give;
+            fd = std::min(fd, food_remaining);
+        } else { // other
+            int give = std::min(fo, (int)(sw / w_o));
+            cur.o += give; sw -= give * w_o;
+            fo -= give;
+        }
+    }
+
+    double val = cur.d * v_d + cur.p * v_p + cur.o * v_o;
+    if (val > best_value + 1e-12) {
+        best_value = val;
+        best = cur;
     }
 
     return best;
@@ -1296,7 +1352,58 @@ void repair_and_adjust_quantities(State &s, Pool &pool, std::mt19937 &rng) {
 // FULL OBJECTIVE FUNCTION (FOR VALIDATION & INITIALIZATION)
 // ===================================================================
 
+// State generate_randomized_initial_state() {
+//     State state;
+//     state.helis.resize(H);
 
+//     vector<int> order(V);
+//     iota(order.begin(), order.end(), 0);
+
+//     std::random_device rd;
+//     std::mt19937 g(rd());
+//     std::shuffle(order.begin(), order.end(), g);
+
+//     for (int h=0; h<H; h++) {
+//         vector<int> assigned;
+//         for (int v: order) if (rand()%H==h) assigned.push_back(v);
+//         if (assigned.empty()) continue;
+
+//         std::shuffle(assigned.begin(), assigned.end(), g);
+
+//         vector<vector<int>> trips;
+//         vector<int> cur;
+//         double cap=0;
+//         for (int v: assigned) {
+//             if (cap > helis[h].w_cap*0.8 && !cur.empty()) {
+//                 trips.push_back(cur); cur.clear(); cap=0;
+//             }
+//             cur.push_back(v);
+//             cap += villages[v].n*5;
+//         }
+//         if (!cur.empty()) trips.push_back(cur);
+
+//         for (auto& tv: trips) {
+//             two_opt_people_weighted(tv, helis[h].home_city);
+
+//             Trip trip;
+//             double cap_left = helis[h].w_cap;
+//             for (int v: tv) {
+//                 Delivery del = allocate_packages(v, cap_left);
+//                 if (del.d+del.p+del.o > 0) {
+//                     trip.stops.push_back(del);
+//                     cap_left -= del.d*w_d + del.p*w_p + del.o*w_o;
+//                 }
+//                 if (cap_left <= 0) break;
+//             }
+//             fill_trip_data(h,trip);
+//             state.helis[h].trips.push_back(trip);
+//         }
+//         fill_helicopter_data(state.helis[h]);
+//     }
+//     fill_delivered_totals(state);
+//     obj_func(state);
+//     return state;
+// }
 //IT DOESNT CHECK IF THE HELICOPTER START AND END FROM THE HOME CITY
 double obj_func(State& state) {
     double total_value = 0.0;
@@ -1367,7 +1474,7 @@ double obj_func(State& state) {
 // INITIAL STATE GENERATION
 // ===================================================================
 
-State generate_initial_state() {
+State generate_initial_state(const std::vector<int> &order) {
     State state;
     state.helis.resize(H);
     state.delivered.assign(V, {0,0,0});
@@ -1385,7 +1492,7 @@ State generate_initial_state() {
 double spare_weight = helis[0].w_cap;  
 
 // Use the new allocator to decide d, p, o
-Delivery del = allocate_best_delivery(v_idx + 1, state, 0, spare_weight);
+Delivery del = allocate_best_delivery(v_idx + 1, state, 0, spare_weight,order);
 
 // Skip if nothing can be delivered
 if (del.d + del.p + del.o == 0) continue;
@@ -1599,11 +1706,13 @@ State run_alns(State initial, ALNSData &alns){
             case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng); break;
         }
         // print_state(temp);
+                change_quantity(current, alns.rng); 
+
                 random_village_fill(temp,alns.rng);
+                
         
                 double true_score = obj_func(temp); 
                 if(true_score == -1e18){continue;}
-                    double incremental_score = temp.objective;
 
         //    if (std::abs(incremental_score - true_score) > 0.01) { // Use a small tolerance
         //     std::cout << "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
@@ -1636,7 +1745,6 @@ State run_alns(State initial, ALNSData &alns){
             }
                             current = temp;
             //      if (std::uniform_real_distribution<>(0, 1)(alns.rng) < 0.90) {
-            //     // change_quantity(current, alns.rng); 
             //     // swap_packet_type(current,alns.rng);
             //     // We don't need to check the return value; if it makes a change, 
             //     // the 'current' state is now even better.
@@ -1703,24 +1811,16 @@ void read_input_from_file(const std::string& filename) {
 // MAIN FUNCTION
 // ===================================================================
 
-int main(){
+int main() {
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(NULL);
-    read_input_from_file("input2.txt");
- precompute_distances();
-        State initial_state = generate_initial_state();
-    print_state(initial_state);
-    
-    // // pool = destroy_random_stop(initial_state, num_to_remove, alns.rng);
+    read_input_from_file("input3.txt");
+    precompute_distances();
 
     ALNSData alns;
-    alns.rng.seed(0); 
-
+    alns.rng.seed(0);
     alns.destroy_names = { random_stop, route_remove, shaw, worst_values_destroyed, perishable_punished };
-    // alns.destroy_names = {random_stop };
-    // alns.repair_names = { greedy_insert };
-
-    alns.repair_names = { greedy_insert, cluster_build, random_insert, new_insert,repair_demand };
+    alns.repair_names = { greedy_insert, cluster_build, random_insert, new_insert, repair_demand };
 
     alns.weightD.assign(alns.destroy_names.size(), 1.0);
     alns.scoreD.assign(alns.destroy_names.size(), 0.0);
@@ -1730,10 +1830,25 @@ int main(){
     alns.scoreR.assign(alns.repair_names.size(), 0.0);
     alns.usesR.assign(alns.repair_names.size(), 0.0);
 
-    State best_solution = run_alns(initial_state, alns);
-    print_state(best_solution);
-    cout<<(best_solution.objective);
-    
+    std::vector<std::vector<int>> perms = {
+        {0,1,2}, {0,2,1},
+        {1,0,2}, {1,2,0},
+        {2,0,1}, {2,1,0}
+    };
 
+State best_overall = run_alns(generate_initial_state(perms[0]), alns);
+print_state(best_overall);   
+ for (size_t i = 1; i < perms.size(); i++) {
+    State init = generate_initial_state(perms[i]);
+    State sol = run_alns(init, alns);
+    // cout << sol.objective << "\n";
+    print_state(sol);
+    if (sol.objective > best_overall.objective) {
+        best_overall = sol;
+    }
+}
+
+    print_state(best_overall);
+    std::cout << best_overall.objective;
     return 0;
 }
