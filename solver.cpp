@@ -610,8 +610,6 @@ bool change_quantity(State& s, std::mt19937& rng) {
     int p_needed = std::max(0, food_limit - (s.delivered[v_idx][0] + s.delivered[v_idx][1]));
     int o_needed = std::max(0, other_limit - s.delivered[v_idx][2]);
 
-    double initial_objective = s.objective;
-
     // Try to add valuable 'p' packets first
     int p_to_add = std::min(p_needed, (int)(spare_weight / w_p));
     if (p_to_add > 0) {
@@ -896,8 +894,6 @@ void repair_greedy_insert(State &s, Pool &pool, std::mt19937 &rng,vector<int> or
             
             const double raw_del_value =
                 best_del.d * v_d + best_del.p * v_p + best_del.o * v_o;
-            const double del_weight =
-                best_del.d * w_d + best_del.p * w_p + best_del.o * w_o;
             
             trip.distance += best_extra_dist;
             trip.value += raw_del_value; // Trip cache uses raw value
@@ -1301,7 +1297,6 @@ void repair_and_adjust_quantities(State &s, Pool &pool, std::mt19937 &rng, std::
             double del_weight = adjusted_del.d * w_d + adjusted_del.p * w_p + adjusted_del.o * w_o;
             if (del_weight > helis[h].w_cap + 1e-9) continue;
 
-            double raw_value = adjusted_del.d * v_d + adjusted_del.p * v_p + adjusted_del.o * v_o;
             double round_trip_dist = dist_matrix[helis[h].home_city - 1][C + village_id - 1] * 2.0;
 
             if (round_trip_dist > helis[h].dcap + 1e-9) continue;
@@ -1477,9 +1472,6 @@ State generate_initial_state(const std::vector<int> &order) {
     // cout<<"HI2"<<endl;
     for(int v_idx : village_indices) {
         // cout<<"HI4";
-        int people = villages[v_idx].n;
-               int food_needed = people * 9;
-        int other_needed = people * 1;
 
       // Compute how much spare weight this helicopter has
 double spare_weight = helis[0].w_cap; 
@@ -1567,8 +1559,8 @@ State run_alns(State initial, ALNSData &alns, const vector<int>& order, std::chr
         alns.T0 = 100; // Fallback temperature
         alns.T = alns.T0;
     }
-
-
+    auto time = deadline - std::chrono::steady_clock::now();
+    auto deadline2 = std::chrono::steady_clock::now() + time/7;
     int iter = 0;
     while (std::chrono::steady_clock::now() < deadline) { 
         // int d_idx = adaptive_picking(alns.weightD, alns.rng);
@@ -1605,25 +1597,37 @@ State run_alns(State initial, ALNSData &alns, const vector<int>& order, std::chr
                 
                 int randIndex = std::uniform_int_distribution<int>(0, 5)(alns.rng);
                 auto new_order = arr[randIndex];
-        switch(alns.repair_names[r_idx]) {
-            case greedy_insert: repair_greedy_insert(temp, pool, alns.rng,new_order); break;
-            // case regret2_insert: repair_regret2_insert(temp, pool, alns.rng); break;
-            case cluster_build: repair_cluster_build(temp, pool, alns.rng,new_order); break;
-            case random_insert: repair_random_insert(temp, pool, alns.rng,new_order); break;
-            case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng,new_order); break;
-            case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng,new_order); break;
+
+        if(std::chrono::steady_clock::now() < deadline2){
+            switch(alns.repair_names[r_idx]) {
+                case greedy_insert: repair_greedy_insert(temp, pool, alns.rng,order); break;
+                // case regret2_insert: repair_regret2_insert(temp, pool, alns.rng); break;
+                case cluster_build: repair_cluster_build(temp, pool, alns.rng,order); break;
+                case random_insert: repair_random_insert(temp, pool, alns.rng,order); break;
+                case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng,order); break;
+                case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng,order); break;
+            }
+            // print_state(temp);
+            change_quantity(temp, alns.rng);
+            random_village_fill(temp,alns.rng,new_order);
         }
-        // print_state(temp);
-                change_quantity(current, alns.rng); 
-
-                random_village_fill(temp,alns.rng,new_order);
-                
+        else{
+            switch(alns.repair_names[r_idx]) {
+                case greedy_insert: repair_greedy_insert(temp, pool, alns.rng,new_order); break;
+                // case regret2_insert: repair_regret2_insert(temp, pool, alns.rng); break;
+                case cluster_build: repair_cluster_build(temp, pool, alns.rng,new_order); break;
+                case random_insert: repair_random_insert(temp, pool, alns.rng,new_order); break;
+                case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng,new_order); break;
+                case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng,new_order); break;
+            }
+            // print_state(temp);
+            change_quantity(temp, alns.rng); 
+            random_village_fill(temp,alns.rng,new_order);
+        }  
         
-                double true_score = obj_func(temp); 
-                if(true_score == -1e18){continue;}
+        double true_score = obj_func(temp); 
+        if(true_score == -1e18){continue;}
             
-
-     
         double delta = temp.objective - current.objective;
         bool accept = (delta >= 0) || (std::uniform_real_distribution<double>(0,1)(alns.rng) < exp(delta / alns.T));
         
@@ -1689,7 +1693,7 @@ void output_solution_from_state(const State &state, vector<HelicopterPlan>& sol)
     sol.resize(H);
     for (int h = 0; h < H; h++) {
         // Use the helicopter id provided in our helis (or use h+1, as needed).
-        sol[h].helicopter_id = helis[h].home_city;
+        sol[h].helicopter_id = h+1;
         for (const auto &trip : state.helis[h].trips) {
             if(trip.stops.empty()) continue;
             int total_d = 0, total_p = 0, total_o = 0;
@@ -1779,7 +1783,7 @@ Solution solve(const ProblemData& problem) {
 
     // 4. Get time limit and divide among permutations
     auto start_time = Clock::now();
-    auto total_duration = chrono::milliseconds(static_cast<long>(time_limit_minutes * 60 * 1000 * 0.9999));
+    auto total_duration = chrono::milliseconds(static_cast<long>(time_limit_minutes * 60 * 1000 * 0.99));
     auto time_per_perm = total_duration / 6;
     
     State best_state; 
@@ -1810,6 +1814,7 @@ Solution solve(const ProblemData& problem) {
         best_state.objective = 0.0;
     }
     
+    // cout << obj_func(best_state) << endl;
     // 6. Convert best ALNS state to the Solution type expected by io_handler.
     Solution sol;
     output_solution_from_state(best_state, sol);
