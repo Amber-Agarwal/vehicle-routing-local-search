@@ -7,6 +7,7 @@
 #include <numeric>
 #include <algorithm>
 #include <map>
+#include <bits/stdc++.h>
 #include "structures.h"
 
 using namespace std;
@@ -1547,7 +1548,7 @@ if (del.d + del.p + del.o == 0) continue;
     return state;
 }
 
-State run_alns(State initial, ALNSData &alns, const vector<int>& order, std::chrono::steady_clock::time_point deadline){
+State run_alns(State initial, ALNSData &alns, const vector<int>& order, Clock::time_point deadline){
     // obj_func(initial); // Calculate initial objective
     State current = initial;
     State best = initial;
@@ -1559,10 +1560,11 @@ State run_alns(State initial, ALNSData &alns, const vector<int>& order, std::chr
         alns.T0 = 100; // Fallback temperature
         alns.T = alns.T0;
     }
-    auto time = deadline - std::chrono::steady_clock::now();
-    auto deadline2 = std::chrono::steady_clock::now() + time/7;
     int iter = 0;
-    while (std::chrono::steady_clock::now() < deadline) { 
+    auto noww = Clock::now();
+    auto time = deadline - noww;
+    auto deadline2 = noww + time/6;
+    while (Clock::now() < deadline) { 
         // int d_idx = adaptive_picking(alns.weightD, alns.rng);
         // int r_idx = adaptive_picking(alns.weightR, alns.rng);
         int d_idx = std::uniform_int_distribution<int>(0,alns.weightD.size()-1)(alns.rng);
@@ -1598,42 +1600,37 @@ State run_alns(State initial, ALNSData &alns, const vector<int>& order, std::chr
                 int randIndex = std::uniform_int_distribution<int>(0, 5)(alns.rng);
                 auto new_order = arr[randIndex];
 
-        if(std::chrono::steady_clock::now() < deadline2){
+        if(Clock::now() < deadline2){
             switch(alns.repair_names[r_idx]) {
                 case greedy_insert: repair_greedy_insert(temp, pool, alns.rng,order); break;
-                // case regret2_insert: repair_regret2_insert(temp, pool, alns.rng); break;
                 case cluster_build: repair_cluster_build(temp, pool, alns.rng,order); break;
                 case random_insert: repair_random_insert(temp, pool, alns.rng,order); break;
                 case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng,order); break;
                 case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng,order); break;
             }
-            // print_state(temp);
-            change_quantity(temp, alns.rng);
-            random_village_fill(temp,alns.rng,new_order);
+            change_quantity(temp, alns.rng); 
+            random_village_fill(temp,alns.rng,order); 
         }
         else{
             switch(alns.repair_names[r_idx]) {
                 case greedy_insert: repair_greedy_insert(temp, pool, alns.rng,new_order); break;
-                // case regret2_insert: repair_regret2_insert(temp, pool, alns.rng); break;
                 case cluster_build: repair_cluster_build(temp, pool, alns.rng,new_order); break;
                 case random_insert: repair_random_insert(temp, pool, alns.rng,new_order); break;
                 case new_insert: repair_and_adjust_quantities(temp,pool,alns.rng,new_order); break;
                 case repair_demand: repair_fill_demand_new_trips(temp,pool,alns.rng,new_order); break;
             }
-            // print_state(temp);
             change_quantity(temp, alns.rng); 
-            random_village_fill(temp,alns.rng,new_order);
-        }  
+            random_village_fill(temp,alns.rng,new_order); 
+        }
         
         double true_score = obj_func(temp); 
         if(true_score == -1e18){continue;}
             
         double delta = temp.objective - current.objective;
         bool accept = (delta >= 0) || (std::uniform_real_distribution<double>(0,1)(alns.rng) < exp(delta / alns.T));
-        
 
-            if ((iter + 1) % alns.update_window == 0){
-             if(accept){
+        if ((iter + 1) % alns.update_window == 0) {
+            if (accept) {
                 if (temp.objective > best.objective) {
                 weight_of_permu[index] +=alns.r_best;
                 
@@ -1721,6 +1718,8 @@ void output_solution_from_state(const State &state, vector<HelicopterPlan>& sol)
 
 // --- Modified solve() implementing our ALNS logic with time allocation and conversion ---
 Solution solve(const ProblemData& problem) {
+    auto start_time = Clock::now();
+    auto deadline_final = start_time + chrono::milliseconds(static_cast<long>((problem.time_limit_minutes * 60 - 3) * 1000 ));
     cout << "Starting solver..." << endl;
     // 1. Initialize globals from ProblemData
     time_limit_minutes = problem.time_limit_minutes;
@@ -1759,7 +1758,6 @@ Solution solve(const ProblemData& problem) {
     // 2. Set up ALNS parameters
     ALNSData alns;
     alns.rng.seed(0);
-    // For simplicity we use dummy destroy/repair operator ids and make 5 available for each.
     alns.destroy_names = {random_stop, route_remove, shaw, worst_values_destroyed, perishable_punished};
     alns.repair_names  = {greedy_insert, cluster_build, random_insert, new_insert, repair_demand};
     alns.weightD.assign(5, 1.0);
@@ -1782,17 +1780,21 @@ Solution solve(const ProblemData& problem) {
     };
 
     // 4. Get time limit and divide among permutations
-    auto start_time = Clock::now();
-    auto total_duration = chrono::milliseconds(static_cast<long>(time_limit_minutes * 60 * 1000 * 0.99));
-    auto time_per_perm = total_duration / 6;
-    
+    //auto start_time = Clock::now();
+    // auto total_duration = chrono::milliseconds(static_cast<long>(time_limit_minutes * 60 * 1000 * 0.99));
+
     State best_state; 
     best_state.objective = -1e18;
     // Run ALNS for each permutation until the total time is nearly reached.
     auto perm_start = Clock::now();
+    auto time_per_perm = (deadline_final - perm_start) / 6;
     auto perm_deadline = perm_start + time_per_perm;
+    // auto deadline = perm_start + total_duration;
     State init0 = generate_initial_state(perms[0]);
     State sol0 = run_alns(init0, alns, perms[0], perm_deadline);
+    if(sol0.objective > best_state.objective) {
+        best_state = sol0;
+    }
     for (size_t i = 1; i < perms.size(); i++) {
         auto perm_start = Clock::now();
         auto perm_deadline = perm_start + time_per_perm;
@@ -1802,7 +1804,7 @@ Solution solve(const ProblemData& problem) {
         if (sol_state.objective > best_state.objective) {
             best_state = sol_state;
         }
-        if (Clock::now() > start_time + total_duration)
+        if (Clock::now() > deadline_final)
             break;
     }
     

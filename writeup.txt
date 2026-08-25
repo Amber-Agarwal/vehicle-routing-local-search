@@ -1,0 +1,7 @@
+1. Even though we have taken help from the following students and LLMs in terms of discussing ideas and coding practices, all our code is written by us.
+2. We have discussed ideas with the following - 
+(i) Ahilaan 
+(ii) Anoop
+(iii) Reeshabh
+(iv) CHATGPT
+(v) Gemini

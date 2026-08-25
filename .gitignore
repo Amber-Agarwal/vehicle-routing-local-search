@@ -1,0 +1,15 @@
+# Build artifacts
+*.o
+*.exe
+main
+format_checker
+
+# Editor/IDE
+.vscode/
+.cph/
+.idea/
+
+# Solver-generated output files (not the tracked examples in sample_io/)
+/output*.txt
+results.log
+tests/outputs/
